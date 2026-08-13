@@ -1,6 +1,8 @@
 pub mod clock;
 pub mod exec;
 pub mod komorebi;
+pub mod lhm;
+pub mod stats;
 
 use std::sync::Arc;
 
@@ -56,6 +58,10 @@ pub fn build(name: &str, cfg: &BarConfig) -> Option<Box<dyn Widget>> {
         "clock" => Some(Box::new(clock::Clock::new(cfg, &section))),
         "exec" => Some(Box::new(exec::Exec::new(cfg, &section))),
         "workspaces" => Some(Box::new(komorebi::Workspaces::new(cfg, &section))),
+        "cpu" => Some(Box::new(stats::Cpu::new(cfg, &section))),
+        "mem" => Some(Box::new(stats::Mem::new(cfg, &section))),
+        "gpu_temp" => Some(Box::new(stats::GpuTemp::new(cfg, &section))),
+        "lhm" => Some(Box::new(lhm::Lhm::new(cfg, &section))),
         _ => None,
     }
 }
