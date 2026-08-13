@@ -426,39 +426,79 @@ impl Bar {
         v * self.scale
     }
 
-    /// True when the foreground window fully covers this bar's monitor
-    /// (borderless or exclusive fullscreen). Real appbars get told via
-    /// ABN_FULLSCREENAPP; we aren't one, so use the same geometric test
-    /// optim's game mode uses, polled from the 250 ms timer.
+    /// True when ANY visible window fully covers this bar's monitor
+    /// (borderless or exclusive fullscreen) — focused or not. A fullscreen
+    /// RDP session's hover-activated connection bar lives at the top edge;
+    /// it must get the mouse even while the user works on another monitor,
+    /// so foreground-only detection isn't enough. Polled from the 250 ms
+    /// timer (real appbars get ABN_FULLSCREENAPP, but not reliably for
+    /// unfocused windows either).
     fn fullscreen_on_monitor(&self) -> bool {
-        use windows::Win32::Graphics::Gdi::{MonitorFromWindow, MONITOR_DEFAULTTONEAREST};
+        use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
         use windows::Win32::UI::WindowsAndMessaging::{
-            GetClassNameW, GetForegroundWindow, GetWindowRect,
+            EnumWindows, GetClassNameW, GetWindowRect, GetWindowThreadProcessId, IsIconic,
+            IsWindowVisible,
         };
-        unsafe {
-            let fg = GetForegroundWindow();
-            if fg == HWND::default() {
-                return false;
+
+        struct Ctx {
+            mon_rect: RECT,
+            my_pid: u32,
+            found: bool,
+        }
+
+        unsafe extern "system" fn cb(hwnd: HWND, lp: LPARAM) -> windows::core::BOOL {
+            let ctx = &mut *(lp.0 as *mut Ctx);
+            if !IsWindowVisible(hwnd).as_bool() || IsIconic(hwnd).as_bool() {
+                return true.into();
             }
-            if MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST).0 as isize != self.monitor {
-                return false;
+            // Skip our own windows (bars are monitor-sized strips, but be safe).
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(hwnd, Some(&mut pid));
+            if pid == ctx.my_pid {
+                return true.into();
+            }
+            // Cloaked UWP ghosts report full-screen rects while invisible.
+            let mut cloaked: u32 = 0;
+            let _ = DwmGetWindowAttribute(
+                hwnd,
+                DWMWA_CLOAKED,
+                &mut cloaked as *mut _ as *mut _,
+                std::mem::size_of::<u32>() as u32,
+            );
+            if cloaked != 0 {
+                return true.into();
             }
             // The desktop and shell surfaces are monitor-sized but aren't games.
             let mut class = [0u16; 64];
-            let n = GetClassNameW(fg, &mut class) as usize;
+            let n = GetClassNameW(hwnd, &mut class) as usize;
             let class = String::from_utf16_lossy(&class[..n]);
-            if matches!(class.as_str(), "WorkerW" | "Progman" | "Shell_TrayWnd") {
-                return false;
+            if matches!(
+                class.as_str(),
+                "WorkerW" | "Progman" | "Shell_TrayWnd" | "Shell_SecondaryTrayWnd"
+            ) {
+                return true.into();
             }
             let mut rect = RECT::default();
-            if GetWindowRect(fg, &mut rect).is_err() {
-                return false;
+            if GetWindowRect(hwnd, &mut rect).is_err() {
+                return true.into();
             }
-            let m = self.mon_rect;
-            rect.left <= m.left
-                && rect.top <= m.top
-                && rect.right >= m.right
-                && rect.bottom >= m.bottom
+            let m = ctx.mon_rect;
+            if rect.left <= m.left && rect.top <= m.top && rect.right >= m.right && rect.bottom >= m.bottom
+            {
+                ctx.found = true;
+                return false.into(); // stop enumerating
+            }
+            true.into()
+        }
+
+        unsafe {
+            let mut ctx = Ctx {
+                mon_rect: self.mon_rect,
+                my_pid: windows::Win32::System::Threading::GetCurrentProcessId(),
+                found: false,
+            };
+            let _ = EnumWindows(Some(cb), LPARAM(&mut ctx as *mut _ as isize));
+            ctx.found
         }
     }
 
@@ -899,8 +939,11 @@ impl Bar {
                     LRESULT(0)
                 }
                 WM_APP_APPBAR => {
-                    // Shell notification (pos change, fullscreen): re-assert.
-                    self.position();
+                    // ABN_POSCHANGED: another appbar moved; re-negotiate.
+                    // (Fullscreen shows/hides run off the timer poll instead.)
+                    if wparam.0 == 1 {
+                        self.position();
+                    }
                     LRESULT(0)
                 }
                 WM_DESTROY => {

@@ -1,6 +1,6 @@
 [package]
 name = "optim-bar"
-version = "0.2.4"
+version = "0.2.5"
 edition = "2021"
 description = "Minimal, fast, native status bar for Windows — companion to optim"
 license = "MIT"
