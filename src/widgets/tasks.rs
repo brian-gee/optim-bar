@@ -169,9 +169,9 @@ impl Tasks {
 impl Widget for Tasks {
     fn tick(&mut self) -> bool {
         self.ticks += 1;
-        if self.ticks % 4 != 1 {
-            return false; // 1 s cadence
-        }
+        // Enumerate every 250 ms tick — enumeration is cheap; it's icon
+        // extraction that costs, and that's cached below. This is what makes
+        // desktop switches feel instant.
         let mut ctx = EnumCtx {
             monitor: self.monitor,
             out: Vec::new(),
@@ -180,11 +180,19 @@ impl Widget for Tasks {
             let _ = EnumWindows(Some(enum_cb), LPARAM(&mut ctx as *mut _ as isize));
         }
         let fresh = ctx.out;
+        // The icon cache survives workspace switches: a window that cloaks
+        // and comes back keeps its pixels, no re-fetch. Prune only entries
+        // whose window is actually gone (every ~30 s), so the map stays
+        // bounded without evicting live apps.
+        if self.ticks % 120 == 0 {
+            self.icons.retain(|&k, _| unsafe {
+                windows::Win32::UI::WindowsAndMessaging::IsWindow(Some(HWND(k as *mut _)))
+                    .as_bool()
+            });
+        }
         if fresh == self.windows {
             return false;
         }
-        // Retain cache only for live windows; fetch icons for new ones.
-        self.icons.retain(|k, _| fresh.contains(k));
         for &hwnd in &fresh {
             self.icons
                 .entry(hwnd)
