@@ -2,6 +2,7 @@
 
 mod bar;
 mod config;
+mod json;
 mod widgets;
 
 use windows::core::{w, Result};

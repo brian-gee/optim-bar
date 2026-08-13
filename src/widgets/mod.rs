@@ -1,5 +1,6 @@
 pub mod clock;
 pub mod exec;
+pub mod komorebi;
 
 use std::sync::Arc;
 
@@ -54,6 +55,7 @@ pub fn build(name: &str, cfg: &BarConfig) -> Option<Box<dyn Widget>> {
     match cfg.ini.get_or(&section, "type", name).as_str() {
         "clock" => Some(Box::new(clock::Clock::new(cfg, &section))),
         "exec" => Some(Box::new(exec::Exec::new(cfg, &section))),
+        "workspaces" => Some(Box::new(komorebi::Workspaces::new(cfg, &section))),
         _ => None,
     }
 }
