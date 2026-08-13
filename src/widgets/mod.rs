@@ -3,6 +3,8 @@ pub mod exec;
 pub mod komorebi;
 pub mod lhm;
 pub mod stats;
+pub mod tasks;
+pub mod volume;
 
 use std::sync::Arc;
 
@@ -62,6 +64,8 @@ pub fn build(name: &str, cfg: &BarConfig) -> Option<Box<dyn Widget>> {
         "mem" => Some(Box::new(stats::Mem::new(cfg, &section))),
         "gpu_temp" => Some(Box::new(stats::GpuTemp::new(cfg, &section))),
         "lhm" => Some(Box::new(lhm::Lhm::new(cfg, &section))),
+        "volume" => Some(Box::new(volume::Volume::new(cfg, &section))),
+        "tasks" => Some(Box::new(tasks::Tasks::new(cfg, &section))),
         _ => None,
     }
 }
