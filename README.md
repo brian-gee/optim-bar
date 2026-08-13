@@ -15,6 +15,13 @@ context — a single small exe rendering with software Direct2D.
 - **Script widgets** — run any command line on an interval, show its stdout,
   bind commands to left/middle/right click. YASB-style `<span>` color output
   is understood, so YASB custom-widget scripts work unchanged.
+- **System tray host** — the bar *is* the tray: it takes over the
+  Shell_NotifyIcon protocol, hides explorer's taskbar, and renders every
+  tray icon with click/right-click forwarding. `--restore-tray` hands
+  everything back to explorer instantly.
+- **Multi-monitor** — one bar per monitor (`monitors = all|primary`),
+  rebuilt automatically when displays attach/detach, per-monitor DPI aware,
+  per-monitor widget overrides via `[left.1]`-style sections
 - Registers as an AppBar: maximized windows stop at the bar's edge
 - Hot-reloading INI config; dark Catppuccin Mocha defaults; no light mode
 
@@ -44,5 +51,11 @@ optim-bar.exe --uninstall-autostart
 
 ## Not included (yet)
 
-System-tray hosting (the Win11 taskbar keeps that job for now), calendar and
-per-app mixer popups (sndvol opens instead), multi-monitor bars.
+Calendar and per-app mixer popups (right-click the clock for the date;
+volume click opens sndvol), tray icon overflow/pinning (all icons show flat).
+
+## If the taskbar ever seems gone
+
+optim-bar hides explorer's taskbar while hosting the tray. If the bar dies
+ungracefully, run `optim-bar.exe --restore-tray` (or just start the bar
+again) — it un-hides explorer's taskbar and broadcasts TaskbarCreated.

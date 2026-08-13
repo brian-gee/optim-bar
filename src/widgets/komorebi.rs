@@ -15,7 +15,6 @@ use crate::json::Value;
 use crate::widgets::exec::spawn_hidden;
 use crate::widgets::{Role, Segment, Widget};
 
-const PIPE_NAME: &str = "optim-bar-komorebi";
 
 #[derive(Clone, PartialEq)]
 struct Ws {
@@ -90,9 +89,11 @@ fn seed(state: &Arc<Mutex<State>>, monitor: usize) {
 }
 
 /// Blocking subscription loop: named pipe + `komorebic subscribe-pipe`.
+/// Pipe name carries the monitor index so multi-monitor bars don't collide.
 fn subscribe(state: Arc<Mutex<State>>, alive: Arc<AtomicBool>, monitor: usize) {
     unsafe {
-        let path16: Vec<u16> = format!("\\\\.\\pipe\\{PIPE_NAME}")
+        let pipe_name = format!("optim-bar-komorebi-{monitor}");
+        let path16: Vec<u16> = format!("\\\\.\\pipe\\{pipe_name}")
             .encode_utf16()
             .chain(std::iter::once(0))
             .collect();
@@ -113,7 +114,7 @@ fn subscribe(state: Arc<Mutex<State>>, alive: Arc<AtomicBool>, monitor: usize) {
             }
 
             seed(&state, monitor);
-            spawn_hidden(&format!("komorebic subscribe-pipe {PIPE_NAME}"));
+            spawn_hidden(&format!("komorebic subscribe-pipe {pipe_name}"));
 
             if ConnectNamedPipe(pipe, None).is_ok() {
                 let mut acc: Vec<u8> = Vec::new();
@@ -176,8 +177,10 @@ pub struct Workspaces {
 }
 
 impl Workspaces {
-    pub fn new(cfg: &BarConfig, section: &str) -> Workspaces {
-        let monitor = cfg.ini.get_u64(section, "monitor", 0) as usize;
+    pub fn new(cfg: &BarConfig, section: &str, bar_index: usize) -> Workspaces {
+        // Default to this bar's monitor index; `monitor =` overrides when
+        // komorebi's ordering differs from the display enumeration.
+        let monitor = cfg.ini.get_u64(section, "monitor", bar_index as u64) as usize;
         let hide_empty = cfg.ini.get_or(section, "hide_empty", "true") != "false";
         let state = Arc::new(Mutex::new(State::default()));
         let alive = Arc::new(AtomicBool::new(true));

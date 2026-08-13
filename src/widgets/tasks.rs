@@ -22,9 +22,14 @@ use crate::bar::ICON_SRC;
 use crate::config::BarConfig;
 use crate::widgets::{Segment, Widget};
 
-/// EnumWindows sink: collects candidate top-level windows for the primary monitor.
+struct EnumCtx {
+    monitor: isize,
+    out: Vec<isize>,
+}
+
+/// EnumWindows sink: collects candidate top-level windows on one monitor.
 unsafe extern "system" fn enum_cb(hwnd: HWND, lparam: LPARAM) -> windows::core::BOOL {
-    let out = &mut *(lparam.0 as *mut Vec<isize>);
+    let ctx = &mut *(lparam.0 as *mut EnumCtx);
     if !IsWindowVisible(hwnd).as_bool() {
         return true.into();
     }
@@ -48,17 +53,16 @@ unsafe extern "system" fn enum_cb(hwnd: HWND, lparam: LPARAM) -> windows::core::
     if cloaked != 0 {
         return true.into();
     }
-    // Primary-monitor windows only (bar is primary-only for now).
-    let primary = MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY);
-    if MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) != primary {
+    // Only windows on this bar's monitor.
+    if MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST).0 as isize != ctx.monitor {
         return true.into();
     }
-    out.push(hwnd.0 as isize);
+    ctx.out.push(hwnd.0 as isize);
     true.into()
 }
 
 /// Renders an HICON into 32x32 premultiplied BGRA.
-fn icon_pixels(hicon: HICON) -> Option<Vec<u8>> {
+pub fn icon_pixels(hicon: HICON) -> Option<Vec<u8>> {
     unsafe {
         let screen = GetDC(None);
         let hdc = CreateCompatibleDC(Some(screen));
@@ -145,14 +149,16 @@ fn window_icon(hwnd: HWND) -> Option<Vec<u8>> {
 }
 
 pub struct Tasks {
+    monitor: isize,
     windows: Vec<isize>,
     icons: HashMap<isize, Option<Arc<Vec<u8>>>>,
     ticks: u32,
 }
 
 impl Tasks {
-    pub fn new(_cfg: &BarConfig, _section: &str) -> Tasks {
+    pub fn new(_cfg: &BarConfig, _section: &str, monitor: isize) -> Tasks {
         Tasks {
+            monitor,
             windows: Vec::new(),
             icons: HashMap::new(),
             ticks: 0,
@@ -166,10 +172,14 @@ impl Widget for Tasks {
         if self.ticks % 4 != 1 {
             return false; // 1 s cadence
         }
-        let mut fresh: Vec<isize> = Vec::new();
+        let mut ctx = EnumCtx {
+            monitor: self.monitor,
+            out: Vec::new(),
+        };
         unsafe {
-            let _ = EnumWindows(Some(enum_cb), LPARAM(&mut fresh as *mut _ as isize));
+            let _ = EnumWindows(Some(enum_cb), LPARAM(&mut ctx as *mut _ as isize));
         }
+        let fresh = ctx.out;
         if fresh == self.windows {
             return false;
         }

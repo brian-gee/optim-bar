@@ -83,6 +83,8 @@ pub struct BarConfig {
     pub height: f32,
     pub position_top: bool,
     pub reserve: bool,
+    /// "all" (default) or "primary".
+    pub all_monitors: bool,
     pub font: String,
     pub font_size: f32,
     pub bg: (u32, f32),
@@ -97,6 +99,28 @@ pub struct BarConfig {
     pub ini: Ini,
 }
 
+impl BarConfig {
+    /// Widget list for a side on a given bar index. `[left.1]` overrides
+    /// `[left]` for the second monitor; unspecified monitors inherit.
+    pub fn side_widgets(&self, side: &str, bar_index: usize) -> Vec<String> {
+        if bar_index > 0 {
+            let per = self.ini.get_list(&format!("{side}.{bar_index}"), "widgets");
+            if self
+                .ini
+                .get(&format!("{side}.{bar_index}"), "widgets")
+                .is_some()
+            {
+                return per;
+            }
+        }
+        match side {
+            "left" => self.left.clone(),
+            "center" => self.center.clone(),
+            _ => self.right.clone(),
+        }
+    }
+}
+
 /// Catppuccin Mocha defaults, mirroring Brian's styles.css.
 const DEFAULT_FILE: &str = "\
 # optim-bar configuration
@@ -106,6 +130,9 @@ const DEFAULT_FILE: &str = "\
 height = 36
 position = top
 reserve = true           # register as AppBar: maximized windows stop at the bar
+monitors = all           # 'all' or 'primary'
+# per-monitor widget overrides: add [left.1] / [center.1] / [right.1]
+# sections with their own `widgets =` line; monitors without one inherit
 font = JetBrainsMono NFP
 font_size = 13
 bg = 181825D9            # RGBA — mantle, ~85% opacity
@@ -148,6 +175,7 @@ pub fn load() -> BarConfig {
         height: ini.get_f32("bar", "height", 36.0).clamp(20.0, 80.0),
         position_top: ini.get_or("bar", "position", "bottom") == "top",
         reserve: ini.get_or("bar", "reserve", "true") != "false",
+        all_monitors: ini.get_or("bar", "monitors", "all") != "primary",
         font: ini.get_or("bar", "font", "JetBrainsMono NFP"),
         font_size: ini.get_f32("bar", "font_size", 13.0).clamp(8.0, 24.0),
         bg: ini.get_color("bar", "bg", (0x181825, 0.85)),

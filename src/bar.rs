@@ -19,13 +19,14 @@ use windows::Win32::Graphics::Gdi::{
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
+use windows::Win32::Foundation::RECT;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, GetSystemMetrics, GetWindowLongPtrW, LoadCursorW,
-    PostQuitMessage, RegisterClassW, SetTimer, SetWindowLongPtrW, SetWindowPos, ShowWindow,
-    CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, HWND_TOPMOST, IDC_ARROW,
-    SM_CXSCREEN, SM_CYSCREEN, SWP_NOACTIVATE, SW_SHOWNA, WM_APP, WM_DESTROY, WM_ERASEBKGND,
-    WM_LBUTTONUP, WM_MBUTTONUP, WM_NCCREATE, WM_PAINT, WM_RBUTTONUP, WM_SIZE, WM_TIMER,
-    WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, GetWindowLongPtrW, LoadCursorW, RegisterClassW, SetTimer,
+    SetWindowLongPtrW, SetWindowPos, ShowWindow, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW,
+    GWLP_USERDATA, HWND_TOPMOST, IDC_ARROW, SWP_NOACTIVATE, SW_SHOWNA, WM_APP, WM_DESTROY,
+    WM_DISPLAYCHANGE, WM_ERASEBKGND, WM_LBUTTONUP, WM_MBUTTONUP, WM_NCCREATE, WM_PAINT,
+    WM_RBUTTONUP, WM_SIZE, WM_TIMER, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_POPUP,
 };
 
 use std::collections::HashMap;
@@ -58,6 +59,70 @@ pub const ICON_SRC: usize = 32;
 
 pub const WINDOW_CLASS: PCWSTR = w!("optim_bar_window");
 pub const WM_APP_RELOAD: u32 = WM_APP + 1;
+
+/// Set by any bar on WM_DISPLAYCHANGE or by the config watcher; the main
+/// loop tears down all bars and recreates them.
+pub static REBUILD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+struct Mon {
+    handle: isize,
+    rect: windows::Win32::Foundation::RECT,
+    primary: bool,
+}
+
+unsafe extern "system" fn mon_cb(
+    hmon: windows::Win32::Graphics::Gdi::HMONITOR,
+    _hdc: windows::Win32::Graphics::Gdi::HDC,
+    _rc: *mut windows::Win32::Foundation::RECT,
+    lparam: LPARAM,
+) -> windows::core::BOOL {
+    let out = &mut *(lparam.0 as *mut Vec<Mon>);
+    let mut mi = windows::Win32::Graphics::Gdi::MONITORINFO {
+        cbSize: std::mem::size_of::<windows::Win32::Graphics::Gdi::MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    let _ = windows::Win32::Graphics::Gdi::GetMonitorInfoW(hmon, &mut mi);
+    out.push(Mon {
+        handle: hmon.0 as isize,
+        rect: mi.rcMonitor,
+        primary: mi.dwFlags & 1 != 0, // MONITORINFOF_PRIMARY
+    });
+    true.into()
+}
+
+fn monitors() -> Vec<Mon> {
+    let mut v: Vec<Mon> = Vec::new();
+    unsafe {
+        let _ = windows::Win32::Graphics::Gdi::EnumDisplayMonitors(
+            None,
+            None,
+            Some(mon_cb),
+            LPARAM(&mut v as *mut _ as isize),
+        );
+    }
+    // Primary first so bar index 0 is always the main monitor.
+    v.sort_by_key(|m| !m.primary);
+    v
+}
+
+/// Creates one bar per monitor (or primary only), per the freshly-read config.
+pub fn create_all() -> Vec<Box<Bar>> {
+    let mons = monitors();
+    let mut bars = Vec::new();
+    for (i, mon) in mons.iter().enumerate() {
+        if i > 0 {
+            let cfg = config::load();
+            if !cfg.all_monitors {
+                break;
+            }
+        }
+        match Bar::create(i, mon.handle, mon.rect) {
+            Ok(b) => bars.push(b),
+            Err(_) => continue,
+        }
+    }
+    bars
+}
 
 const TIMER_TICK: usize = 1;
 const GAP: f32 = 8.0; // between widgets, logical px
@@ -109,10 +174,13 @@ pub struct Bar {
     hits: Vec<HitRect>,
     cfg: BarConfig,
     scale: f32,
+    index: usize,
+    monitor: isize,
+    mon_rect: RECT,
 }
 
 impl Bar {
-    pub fn create() -> Result<Box<Bar>> {
+    pub fn create(index: usize, monitor: isize, mon_rect: RECT) -> Result<Box<Bar>> {
         unsafe {
             let hinstance = GetModuleHandleW(None)?;
             let wc = WNDCLASSW {
@@ -123,7 +191,7 @@ impl Bar {
                 lpszClassName: WINDOW_CLASS,
                 ..Default::default()
             };
-            RegisterClassW(&wc);
+            RegisterClassW(&wc); // fails harmlessly after the first bar
 
             let d2d_factory: ID2D1Factory =
                 D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
@@ -139,6 +207,9 @@ impl Bar {
                 hits: Vec::new(),
                 cfg,
                 scale: 1.0,
+                index,
+                monitor,
+                mon_rect,
             });
             bar.build_slots();
 
@@ -167,16 +238,16 @@ impl Bar {
         self.hwnd.0 as isize
     }
 
+    fn mon_w(&self) -> i32 {
+        self.mon_rect.right - self.mon_rect.left
+    }
+
     fn build_slots(&mut self) {
         self.slots.clear();
-        let groups = [
-            (self.cfg.left.clone(), 0u8),
-            (self.cfg.center.clone(), 1u8),
-            (self.cfg.right.clone(), 2u8),
-        ];
-        for (names, side) in groups {
-            for name in names {
-                if let Some(widget) = widgets::build(&name, &self.cfg) {
+        let groups = [("left", 0u8), ("center", 1u8), ("right", 2u8)];
+        for (side_name, side) in groups {
+            for name in self.cfg.side_widgets(side_name, self.index) {
+                if let Some(widget) = widgets::build(&name, &self.cfg, self.index, self.monitor) {
                     self.slots.push(Slot {
                         widget,
                         side: match side {
@@ -195,10 +266,9 @@ impl Bar {
     /// maximized windows stop at its edge instead of underlapping it.
     fn position(&self) {
         unsafe {
-            let screen_w = GetSystemMetrics(SM_CXSCREEN);
-            let screen_h = GetSystemMetrics(SM_CYSCREEN);
+            let mr = self.mon_rect;
             let h = (self.cfg.height * self.scale) as i32;
-            let mut y = if self.cfg.position_top { 0 } else { screen_h - h };
+            let mut y = if self.cfg.position_top { mr.top } else { mr.bottom - h };
 
             if self.cfg.reserve {
                 let mut abd = APPBARDATA {
@@ -206,11 +276,11 @@ impl Bar {
                     hWnd: self.hwnd,
                     uCallbackMessage: WM_APP_APPBAR,
                     uEdge: if self.cfg.position_top { ABE_TOP } else { ABE_BOTTOM },
-                    rc: windows::Win32::Foundation::RECT {
-                        left: 0,
-                        top: if self.cfg.position_top { 0 } else { screen_h - h },
-                        right: screen_w,
-                        bottom: if self.cfg.position_top { h } else { screen_h },
+                    rc: RECT {
+                        left: mr.left,
+                        top: if self.cfg.position_top { mr.top } else { mr.bottom - h },
+                        right: mr.right,
+                        bottom: if self.cfg.position_top { mr.top + h } else { mr.bottom },
                     },
                     ..Default::default()
                 };
@@ -228,9 +298,9 @@ impl Bar {
             let _ = SetWindowPos(
                 self.hwnd,
                 Some(HWND_TOPMOST),
-                0,
+                mr.left,
                 y,
-                screen_w,
+                self.mon_w(),
                 h,
                 SWP_NOACTIVATE,
             );
@@ -254,7 +324,7 @@ impl Bar {
 
     fn build_gfx(&self) -> Result<Gfx> {
         unsafe {
-            let screen_w = GetSystemMetrics(SM_CXSCREEN) as u32;
+            let screen_w = self.mon_w() as u32;
             let h = (self.cfg.height * self.scale) as u32;
             let rt = self.d2d_factory.CreateHwndRenderTarget(
                 &D2D1_RENDER_TARGET_PROPERTIES {
@@ -355,7 +425,7 @@ impl Bar {
         let Some(mut gfx) = self.gfx.take() else { return };
 
         unsafe {
-            let w = GetSystemMetrics(SM_CXSCREEN) as f32;
+            let w = self.mon_w() as f32;
             let h = self.px(self.cfg.height);
             let pad = self.px(self.cfg.pad);
             let gap = self.px(GAP);
@@ -539,14 +609,6 @@ impl Bar {
         }
     }
 
-    fn reload(&mut self) {
-        self.cfg = config::load();
-        self.build_slots();
-        self.gfx = None;
-        self.position();
-        self.invalidate();
-    }
-
     fn handle(&mut self, hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
         unsafe {
             match msg {
@@ -560,8 +622,10 @@ impl Bar {
                     }
                     LRESULT(0)
                 }
-                WM_APP_RELOAD => {
-                    self.reload();
+                WM_APP_RELOAD | WM_DISPLAYCHANGE => {
+                    // Config or display topology changed: main loop rebuilds
+                    // every bar from scratch.
+                    REBUILD.store(true, std::sync::atomic::Ordering::Relaxed);
                     LRESULT(0)
                 }
                 WM_PAINT => {
@@ -606,9 +670,18 @@ impl Bar {
                     self.position();
                     LRESULT(0)
                 }
+                windows::Win32::UI::WindowsAndMessaging::WM_DPICHANGED => {
+                    // Bar moved to a monitor with different DPI: rescale.
+                    self.scale = ((wparam.0 as u32) & 0xFFFF) as f32 / 96.0;
+                    self.gfx = None;
+                    self.position();
+                    self.invalidate();
+                    LRESULT(0)
+                }
                 WM_DESTROY => {
+                    // Main loop owns bar lifetime (rebuilds on display change),
+                    // so no PostQuitMessage here.
                     self.remove_appbar();
-                    PostQuitMessage(0);
                     LRESULT(0)
                 }
                 _ => DefWindowProcW(hwnd, msg, wparam, lparam),

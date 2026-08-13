@@ -3,6 +3,7 @@ pub mod exec;
 pub mod komorebi;
 pub mod lhm;
 pub mod stats;
+pub mod systray;
 pub mod tasks;
 pub mod volume;
 
@@ -54,18 +55,25 @@ pub trait Widget {
 /// Instantiate a widget by config name (the strings in [left]/[center]/[right]).
 /// `type` in the widget's section overrides the name for lookup, so several
 /// widgets can share an implementation (eq + voicemod are both `exec`).
-pub fn build(name: &str, cfg: &BarConfig) -> Option<Box<dyn Widget>> {
+/// `bar_index` and `monitor` (HMONITOR value) identify the hosting bar.
+pub fn build(
+    name: &str,
+    cfg: &BarConfig,
+    bar_index: usize,
+    monitor: isize,
+) -> Option<Box<dyn Widget>> {
     let section = format!("widget.{name}");
     match cfg.ini.get_or(&section, "type", name).as_str() {
         "clock" => Some(Box::new(clock::Clock::new(cfg, &section))),
         "exec" => Some(Box::new(exec::Exec::new(cfg, &section))),
-        "workspaces" => Some(Box::new(komorebi::Workspaces::new(cfg, &section))),
+        "workspaces" => Some(Box::new(komorebi::Workspaces::new(cfg, &section, bar_index))),
         "cpu" => Some(Box::new(stats::Cpu::new(cfg, &section))),
         "mem" => Some(Box::new(stats::Mem::new(cfg, &section))),
         "gpu_temp" => Some(Box::new(stats::GpuTemp::new(cfg, &section))),
         "lhm" => Some(Box::new(lhm::Lhm::new(cfg, &section))),
         "volume" => Some(Box::new(volume::Volume::new(cfg, &section))),
-        "tasks" => Some(Box::new(tasks::Tasks::new(cfg, &section))),
+        "tasks" => Some(Box::new(tasks::Tasks::new(cfg, &section, monitor))),
+        "systray" => Some(Box::new(systray::Systray::new(cfg, &section))),
         _ => None,
     }
 }

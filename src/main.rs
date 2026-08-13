@@ -3,6 +3,7 @@
 mod bar;
 mod config;
 mod json;
+mod tray;
 mod widgets;
 
 use windows::core::{w, Result};
@@ -17,14 +18,16 @@ use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::HiDpi::{
     SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2,
 };
+use windows::Win32::System::Threading::GetCurrentThreadId;
 use windows::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, GetMessageW, PostMessageW, TranslateMessage, MSG,
+    DestroyWindow, DispatchMessageW, GetMessageW, PostThreadMessageW, TranslateMessage, MSG,
+    WM_NULL,
 };
 
-use bar::{Bar, WM_APP_RELOAD};
+use bar::REBUILD;
 
-/// Watches the config directory; posts WM_APP_RELOAD on changes (debounced).
-fn watch_config(hwnd_val: isize) {
+/// Watches the config directory; flags a rebuild and wakes the main loop.
+fn watch_config(main_tid: u32) {
     unsafe {
         let dir = config::path()
             .parent()
@@ -60,12 +63,8 @@ fn watch_config(hwnd_val: isize) {
                 return;
             }
             std::thread::sleep(std::time::Duration::from_millis(300));
-            let _ = PostMessageW(
-                Some(HWND(hwnd_val as *mut _)),
-                WM_APP_RELOAD,
-                WPARAM(0),
-                LPARAM(0),
-            );
+            REBUILD.store(true, std::sync::atomic::Ordering::Relaxed);
+            let _ = PostThreadMessageW(main_tid, WM_NULL, WPARAM(0), LPARAM(0));
         }
     }
 }
@@ -108,6 +107,11 @@ fn main() -> Result<()> {
     if std::env::args().any(|a| a == "--uninstall-autostart") {
         return set_autostart(false);
     }
+    if std::env::args().any(|a| a == "--restore-tray") {
+        // Escape hatch: un-hide explorer's taskbar and hand tray icons back.
+        tray::restore_explorer_tray();
+        return Ok(());
+    }
     if std::env::args().any(|a| a == "--version") {
         use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_OK};
         let text: Vec<u16> = concat!("optim-bar ", env!("CARGO_PKG_VERSION"))
@@ -133,15 +137,27 @@ fn main() -> Result<()> {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()?;
 
-        let bar = Bar::create()?;
-        let hwnd_val = bar.hwnd_val();
-        std::thread::spawn(move || watch_config(hwnd_val));
+        tray::ensure_host();
+
+        let mut bars = bar::create_all();
+        let main_tid = GetCurrentThreadId();
+        std::thread::spawn(move || watch_config(main_tid));
 
         let mut msg = MSG::default();
         while GetMessageW(&mut msg, None, 0, 0).as_bool() {
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
+            if REBUILD.swap(false, std::sync::atomic::Ordering::Relaxed) {
+                for b in &bars {
+                    let _ = DestroyWindow(HWND(b.hwnd_val() as *mut _));
+                }
+                // Give monitors a beat to settle after topology changes.
+                std::thread::sleep(std::time::Duration::from_millis(300));
+                bars = bar::create_all();
+            }
         }
+        drop(bars);
+        tray::restore_explorer_tray();
     }
     Ok(())
 }
