@@ -25,7 +25,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetWindowLongPtrW, LoadCursorW, PostQuitMessage, RegisterClassW, SetForegroundWindow, SetTimer,
     SetWindowLongPtrW, SetWindowPos, ShowWindow, SystemParametersInfoW, TrackPopupMenu,
     CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, HWND_TOPMOST, IDC_ARROW, MF_GRAYED,
-    MF_SEPARATOR, MF_STRING, SPIF_SENDCHANGE, SPI_SETWORKAREA, SWP_NOACTIVATE, SW_SHOWNA,
+    MF_SEPARATOR, MF_STRING, SPIF_SENDCHANGE, SPI_SETWORKAREA, SWP_NOACTIVATE, SW_HIDE, SW_SHOWNA,
     TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_APP, WM_DESTROY, WM_DISPLAYCHANGE,
     WM_ERASEBKGND, WM_LBUTTONUP, WM_MBUTTONUP, WM_NCCREATE, WM_PAINT, WM_RBUTTONUP, WM_SIZE,
     WM_TIMER, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
@@ -188,6 +188,8 @@ pub struct Bar {
     index: usize,
     monitor: isize,
     mon_rect: RECT,
+    /// Bar is hidden because a fullscreen app owns this monitor.
+    fs_hidden: bool,
 }
 
 impl Bar {
@@ -221,6 +223,7 @@ impl Bar {
                 index,
                 monitor,
                 mon_rect,
+                fs_hidden: false,
             });
             bar.build_slots();
 
@@ -326,6 +329,42 @@ impl Bar {
 
     fn px(&self, v: f32) -> f32 {
         v * self.scale
+    }
+
+    /// True when the foreground window fully covers this bar's monitor
+    /// (borderless or exclusive fullscreen). Real appbars get told via
+    /// ABN_FULLSCREENAPP; we aren't one, so use the same geometric test
+    /// optim's game mode uses, polled from the 250 ms timer.
+    fn fullscreen_on_monitor(&self) -> bool {
+        use windows::Win32::Graphics::Gdi::{MonitorFromWindow, MONITOR_DEFAULTTONEAREST};
+        use windows::Win32::UI::WindowsAndMessaging::{
+            GetClassNameW, GetForegroundWindow, GetWindowRect,
+        };
+        unsafe {
+            let fg = GetForegroundWindow();
+            if fg == HWND::default() {
+                return false;
+            }
+            if MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST).0 as isize != self.monitor {
+                return false;
+            }
+            // The desktop and shell surfaces are monitor-sized but aren't games.
+            let mut class = [0u16; 64];
+            let n = GetClassNameW(fg, &mut class) as usize;
+            let class = String::from_utf16_lossy(&class[..n]);
+            if matches!(class.as_str(), "WorkerW" | "Progman" | "Shell_TrayWnd") {
+                return false;
+            }
+            let mut rect = RECT::default();
+            if GetWindowRect(fg, &mut rect).is_err() {
+                return false;
+            }
+            let m = self.mon_rect;
+            rect.left <= m.left
+                && rect.top <= m.top
+                && rect.right >= m.right
+                && rect.bottom >= m.bottom
+        }
     }
 
     fn build_gfx(&self) -> Result<Gfx> {
@@ -687,11 +726,16 @@ impl Bar {
         unsafe {
             match msg {
                 WM_TIMER => {
+                    let fs = self.fullscreen_on_monitor();
+                    if fs != self.fs_hidden {
+                        self.fs_hidden = fs;
+                        let _ = ShowWindow(self.hwnd, if fs { SW_HIDE } else { SW_SHOWNA });
+                    }
                     let mut dirty = false;
                     for slot in &mut self.slots {
                         dirty |= slot.widget.tick();
                     }
-                    if dirty {
+                    if dirty && !self.fs_hidden {
                         self.invalidate();
                     }
                     LRESULT(0)

@@ -259,6 +259,39 @@ pub fn ensure_host() {
     });
 }
 
+/// Full click gesture for a tray icon: foregrounds the owner (so its menus
+/// can dismiss), then sends the down/up pair — plus WM_CONTEXTMENU for v4
+/// right-clicks. Button 0 = left, 1 = middle, 2 = right.
+pub fn send_button(icon: &TrayIcon, button: u8) {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetCursorPos, SetForegroundWindow, WM_CONTEXTMENU, WM_LBUTTONDOWN, WM_LBUTTONUP,
+        WM_MBUTTONUP, WM_RBUTTONDOWN, WM_RBUTTONUP,
+    };
+    let mut pt = POINT::default();
+    unsafe {
+        let _ = GetCursorPos(&mut pt);
+        let _ = SetForegroundWindow(HWND(icon.owner as usize as *mut _));
+    }
+    let cursor = (pt.x, pt.y);
+    match button {
+        0 => {
+            forward_click(icon, WM_LBUTTONDOWN, cursor);
+            forward_click(icon, WM_LBUTTONUP, cursor);
+        }
+        2 => {
+            forward_click(icon, WM_RBUTTONDOWN, cursor);
+            forward_click(icon, WM_RBUTTONUP, cursor);
+            if icon.version >= 4 {
+                forward_click(icon, WM_CONTEXTMENU, cursor);
+            }
+        }
+        _ => {
+            forward_click(icon, WM_MBUTTONUP, cursor);
+        }
+    }
+}
+
 /// Forwards a mouse event to an icon's owner, honoring NOTIFYICON_VERSION_4.
 pub fn forward_click(icon: &TrayIcon, mouse_msg: u32, cursor: (i32, i32)) {
     if icon.callback == 0 {

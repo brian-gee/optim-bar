@@ -2,6 +2,7 @@
 
 mod bar;
 mod config;
+mod flyout;
 mod json;
 mod tray;
 mod widgets;
