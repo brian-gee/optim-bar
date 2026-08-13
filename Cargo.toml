@@ -1,6 +1,6 @@
 [package]
 name = "optim-bar"
-version = "0.2.7"
+version = "0.4.0"
 edition = "2021"
 description = "Minimal, fast, native status bar for Windows — companion to optim"
 license = "MIT"
@@ -8,9 +8,14 @@ license = "MIT"
 [build-dependencies]
 winres = "0.1"
 
+[dependencies]
+windows-numerics = "0.2"
+
 [dependencies.windows]
 version = "0.61"
 features = [
+    "Data_Xml_Dom",
+    "UI_Notifications",
     "Win32_Foundation",
     "Win32_Graphics_Direct2D",
     "Win32_Graphics_Direct2D_Common",
@@ -19,6 +24,7 @@ features = [
     "Win32_Graphics_Dxgi_Common",
     "Win32_Graphics_Gdi",
     "Win32_Media_Audio",
+    "Win32_Networking_WinHttp",
     "Win32_Media_Audio_Endpoints",
     "Win32_System_Com_StructuredStorage",
     "Win32_System_Variant",

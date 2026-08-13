@@ -10,6 +10,7 @@ use windows::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTAT
 use windows::Win32::System::Threading::GetSystemTimes;
 
 use crate::config::BarConfig;
+use crate::statspop;
 use crate::widgets::{Role, Segment, Widget};
 
 /// Ticks between refreshes (master tick is 250 ms → 8 = 2 s).
@@ -25,6 +26,7 @@ pub struct Cpu {
     last_busy: u64,
     text: String,
     ticks: u32,
+    style: statspop::Style,
 }
 
 impl Cpu {
@@ -35,6 +37,7 @@ impl Cpu {
             last_busy: 0,
             text: String::new(),
             ticks: 0,
+            style: statspop::Style::from_cfg(cfg),
         }
     }
 }
@@ -78,12 +81,19 @@ impl Widget for Cpu {
         }
         vec![Segment::text(&self.text, Role::Fg)]
     }
+
+    fn on_click(&mut self, _seg: usize, button: u8) {
+        if button == 0 {
+            statspop::toggle(self.style.clone());
+        }
+    }
 }
 
 pub struct Mem {
     icon: String,
     text: String,
     ticks: u32,
+    style: statspop::Style,
 }
 
 impl Mem {
@@ -92,6 +102,7 @@ impl Mem {
             icon: cfg.ini.get_or(section, "icon", "\u{efc5}"),
             text: String::new(),
             ticks: 0,
+            style: statspop::Style::from_cfg(cfg),
         }
     }
 }
@@ -124,6 +135,12 @@ impl Widget for Mem {
             return Vec::new();
         }
         vec![Segment::text(&self.text, Role::Fg)]
+    }
+
+    fn on_click(&mut self, _seg: usize, button: u8) {
+        if button == 0 {
+            statspop::toggle(self.style.clone());
+        }
     }
 }
 
@@ -170,6 +187,7 @@ pub struct GpuTemp {
     nvml: Option<Nvml>,
     text: String,
     ticks: u32,
+    style: statspop::Style,
 }
 
 impl GpuTemp {
@@ -179,6 +197,7 @@ impl GpuTemp {
             nvml: nvml_load(),
             text: String::new(),
             ticks: 0,
+            style: statspop::Style::from_cfg(cfg),
         }
     }
 }
@@ -210,5 +229,11 @@ impl Widget for GpuTemp {
             return Vec::new(); // no NVIDIA driver -> widget hides
         }
         vec![Segment::text(&self.text, Role::Fg)]
+    }
+
+    fn on_click(&mut self, _seg: usize, button: u8) {
+        if button == 0 {
+            statspop::toggle(self.style.clone());
+        }
     }
 }

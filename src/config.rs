@@ -194,6 +194,22 @@ widgets =
 [widget.clock]
 format = %a, %d %b %I:%M %p
 format_alt = %A, %d %B %Y
+
+# Weather + airing advisor (Open-Meteo, no key). Click any stat widget
+# (cpu / mem / gpu_temp / cpu_temp) for the system+weather dropdown.
+# Weather stays OFF until you set your coordinates here — they are personal
+# data, live only in this local file, and are sent only to open-meteo.com.
+# window_bearings: compass directions your windows face; wind arriving
+# from within ~60 deg of a bearing counts as feeding the window. Optional;
+# without it wind direction is ignored.
+# [weather]
+# lat = 40.7128        # example: New York City
+# lon = -74.0060
+# window_bearings =
+# toast = on
+# toast_threshold = 65
+# toast_hours_from = 8
+# toast_hours_to = 22
 ";
 
 pub fn path() -> PathBuf {

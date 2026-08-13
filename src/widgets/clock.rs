@@ -15,6 +15,11 @@ const MONTHS_LONG: [&str; 12] = [
     "September", "October", "November", "December",
 ];
 
+/// Current local hour 0-23 (used by the weather toast's quiet-hours gate).
+pub fn local_hour() -> u32 {
+    unsafe { GetLocalTime().wHour as u32 }
+}
+
 /// Minimal strftime: %a %A %d %b %B %m %Y %H %I %M %S %p and %% literals.
 fn format_time(fmt: &str) -> String {
     let t = unsafe { GetLocalTime() };
@@ -60,6 +65,7 @@ pub struct Clock {
     format_alt: String,
     show_alt: bool,
     text: String,
+    style: crate::statspop::Style,
 }
 
 impl Clock {
@@ -72,6 +78,7 @@ impl Clock {
             format_alt,
             show_alt: false,
             text,
+            style: crate::statspop::Style::from_cfg(cfg),
         }
     }
 
@@ -100,6 +107,10 @@ impl Widget for Clock {
     }
 
     fn on_click(&mut self, _seg: usize, button: u8) {
+        if button == 0 {
+            crate::calendar::toggle(self.style.clone());
+            return;
+        }
         if button == 2 {
             self.show_alt = !self.show_alt;
             self.text = format_time(self.active_format());

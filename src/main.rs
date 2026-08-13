@@ -1,10 +1,14 @@
 #![windows_subsystem = "windows"]
 
 mod bar;
+mod calendar;
 mod config;
 mod flyout;
 mod json;
+mod statspop;
+mod toast;
 mod tray;
+mod weather;
 mod widgets;
 
 use windows::core::{w, Result};
@@ -141,6 +145,25 @@ fn main() -> Result<()> {
         CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()?;
 
         tray::ensure_host();
+
+        // Weather + airing advisor: background fetch, toast on good windows.
+        // Runs only when the user has put coordinates in their config.
+        if let Some(wcfg) = weather::read_cfg(&config::load()) {
+            toast::ensure_registered();
+            weather::spawn(wcfg, |h| {
+                toast::show(
+                    "Good time to air out the apartment",
+                    &format!(
+                        "{:.0} km/h from {} \u{b7} {:.0}\u{b0}F \u{b7} {:.0}% humidity \u{b7} score {}",
+                        h.wind_kmh,
+                        weather::compass(h.wind_dir),
+                        h.temp_c * 9.0 / 5.0 + 32.0,
+                        h.humidity,
+                        h.score
+                    ),
+                );
+            });
+        }
 
         let mut bars = bar::create_all();
         let main_tid = GetCurrentThreadId();

@@ -33,6 +33,15 @@ fn http_get_json(host: &str, port: u16, path: &str) -> Option<Value> {
     Value::parse(&body[start..])
 }
 
+/// One-shot read of a sensor's numeric value (used by the stats popup).
+pub fn read_sensor(host: &str, port: u16, sensor_id: &str) -> Option<f64> {
+    http_get_json(host, port, "/data.json")
+        .as_ref()
+        .and_then(|root| find_sensor(root, sensor_id))
+        .and_then(|node| node.get("Value")?.as_str())
+        .and_then(|v| v.split_whitespace().next()?.parse::<f64>().ok())
+}
+
 /// Depth-first search for the node whose SensorId matches.
 fn find_sensor<'a>(node: &'a Value, sensor_id: &str) -> Option<&'a Value> {
     if node.get("SensorId").and_then(|s| s.as_str()) == Some(sensor_id) {
@@ -50,6 +59,7 @@ pub struct Lhm {
     state: Arc<Mutex<String>>, // formatted text, empty = hidden
     alive: Arc<AtomicBool>,
     shown: String,
+    style: crate::statspop::Style,
 }
 
 impl Lhm {
@@ -85,6 +95,7 @@ impl Lhm {
             state,
             alive,
             shown: String::new(),
+            style: crate::statspop::Style::from_cfg(cfg),
         }
     }
 }
@@ -111,5 +122,11 @@ impl Widget for Lhm {
             return Vec::new(); // LHM not running -> hidden by design
         }
         vec![Segment::text(&self.shown, Role::Fg)]
+    }
+
+    fn on_click(&mut self, _seg: usize, button: u8) {
+        if button == 0 {
+            crate::statspop::toggle(self.style.clone());
+        }
     }
 }
