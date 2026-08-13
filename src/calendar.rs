@@ -41,9 +41,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use crate::statspop::Style;
 
 const CLASS: PCWSTR = w!("optim_bar_calendar");
-const CELL: f32 = 36.0;
-const TITLE_H: f32 = 40.0;
-const WEEKDAY_H: f32 = 26.0;
+const CELL_W: f32 = 46.0;
+const CELL_H: f32 = 27.0;
+const TITLE_H: f32 = 34.0;
+const WEEKDAY_H: f32 = 22.0;
 const PAD: f32 = 12.0;
 const COLS: f32 = 7.0;
 
@@ -141,8 +142,8 @@ impl Cal {
     }
 
     fn size(&self) -> (f32, f32) {
-        let w = PAD * 2.0 + COLS * CELL;
-        let h = PAD * 2.0 + TITLE_H + WEEKDAY_H + 6.0 * CELL;
+        let w = PAD * 2.0 + COLS * CELL_W;
+        let h = PAD * 2.0 + TITLE_H + WEEKDAY_H + 6.0 * CELL_H;
         (w, h)
     }
 
@@ -199,9 +200,9 @@ impl Cal {
             let grid_top = s(PAD + TITLE_H);
             for (i, wd) in WEEKDAYS.iter().enumerate() {
                 let rect = D2D_RECT_F {
-                    left: s(PAD) + i as f32 * s(CELL),
+                    left: s(PAD) + i as f32 * s(CELL_W),
                     top: grid_top,
-                    right: s(PAD) + (i + 1) as f32 * s(CELL),
+                    right: s(PAD) + (i + 1) as f32 * s(CELL_W),
                     bottom: grid_top + s(WEEKDAY_H),
                 };
                 text(wd, &gfx.fmt, &rect, &gfx.dim);
@@ -222,10 +223,10 @@ impl Cal {
             for cell in 0..42u32 {
                 let (row_i, col_i) = (cell / 7, cell % 7);
                 let rect = D2D_RECT_F {
-                    left: s(PAD) + col_i as f32 * s(CELL),
-                    top: cells_top + row_i as f32 * s(CELL),
-                    right: s(PAD) + (col_i + 1) as f32 * s(CELL),
-                    bottom: cells_top + (row_i + 1) as f32 * s(CELL),
+                    left: s(PAD) + col_i as f32 * s(CELL_W),
+                    top: cells_top + row_i as f32 * s(CELL_H),
+                    right: s(PAD) + (col_i + 1) as f32 * s(CELL_W),
+                    bottom: cells_top + (row_i + 1) as f32 * s(CELL_H),
                 };
                 // Which day does this cell hold?
                 let (day, in_month) = if cell < first_wd {
@@ -247,8 +248,8 @@ impl Cal {
                                 right: rect.right - inset,
                                 bottom: rect.bottom - inset,
                             },
-                            radiusX: s(10.0),
-                            radiusY: s(10.0),
+                            radiusX: s(9.0),
+                            radiusY: s(9.0),
                         },
                         &gfx.accent,
                     );
