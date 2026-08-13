@@ -1,7 +1,7 @@
 use windows::Win32::System::SystemInformation::GetLocalTime;
 
 use crate::config::BarConfig;
-use crate::widgets::Widget;
+use crate::widgets::{Role, Segment, Widget};
 
 const DAYS_SHORT: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 const DAYS_LONG: [&str; 7] = [
@@ -95,11 +95,11 @@ impl Widget for Clock {
         }
     }
 
-    fn text(&self) -> &str {
-        &self.text
+    fn segments(&self) -> Vec<Segment> {
+        vec![Segment::text(&self.text, Role::Fg)]
     }
 
-    fn on_click(&mut self, button: u8) {
+    fn on_click(&mut self, _seg: usize, button: u8) {
         if button == 2 {
             self.show_alt = !self.show_alt;
             self.text = format_time(self.active_format());
