@@ -66,7 +66,9 @@ pub fn build(
     match cfg.ini.get_or(&section, "type", name).as_str() {
         "clock" => Some(Box::new(clock::Clock::new(cfg, &section))),
         "exec" => Some(Box::new(exec::Exec::new(cfg, &section))),
-        "workspaces" => Some(Box::new(komorebi::Workspaces::new(cfg, &section, bar_index))),
+        "workspaces" => Some(Box::new(komorebi::Workspaces::new(
+            cfg, &section, bar_index, monitor,
+        ))),
         "cpu" => Some(Box::new(stats::Cpu::new(cfg, &section))),
         "mem" => Some(Box::new(stats::Mem::new(cfg, &section))),
         "gpu_temp" => Some(Box::new(stats::GpuTemp::new(cfg, &section))),

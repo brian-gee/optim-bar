@@ -15,14 +15,21 @@ use crate::widgets::{Role, Segment, Widget};
 pub struct Systray {
     state: TrayState,
     shown: Vec<TrayIcon>,
+    /// Icons hide behind a chevron until clicked (Windows overflow style);
+    /// `collapsed = false` in [widget.systray] pins them always-visible.
+    collapsible: bool,
+    expanded: bool,
 }
 
 impl Systray {
-    pub fn new(_cfg: &BarConfig, _section: &str) -> Systray {
+    pub fn new(cfg: &BarConfig, section: &str) -> Systray {
         tray::ensure_host();
+        let collapsible = cfg.ini.get_or(section, "collapsed", "true") != "false";
         Systray {
             state: tray::state(),
             shown: Vec::new(),
+            collapsible,
+            expanded: !collapsible,
         }
     }
 }
@@ -53,24 +60,40 @@ impl Widget for Systray {
     }
 
     fn segments(&self) -> Vec<Segment> {
-        self.shown
-            .iter()
-            .filter(|i| !i.hidden)
-            .map(|i| {
-                let key = ((i.owner as u64) << 32) | i.uid as u64;
-                match &i.pixels {
-                    Some(px) => Segment {
-                        text: String::new(),
-                        role: Role::Fg,
-                        icon: Some((key, px.clone())),
-                    },
-                    None => Segment::text("\u{f111}", Role::Dim),
-                }
-            })
-            .collect()
+        let mut out = Vec::new();
+        if self.collapsible {
+            // nf-fa chevron_up when hidden (click to reveal), _down to tuck away
+            let glyph = if self.expanded { "\u{f078}" } else { "\u{f077}" };
+            out.push(Segment::text(glyph, Role::Dim));
+            if !self.expanded {
+                return out;
+            }
+        }
+        out.extend(self.shown.iter().filter(|i| !i.hidden).map(|i| {
+            let key = ((i.owner as u64) << 32) | i.uid as u64;
+            match &i.pixels {
+                Some(px) => Segment {
+                    text: String::new(),
+                    role: Role::Fg,
+                    icon: Some((key, px.clone())),
+                },
+                None => Segment::text("\u{f111}", Role::Dim),
+            }
+        }));
+        out
     }
 
     fn on_click(&mut self, seg: usize, button: u8) {
+        let mut seg = seg;
+        if self.collapsible {
+            if seg == 0 {
+                if button == 0 {
+                    self.expanded = !self.expanded;
+                }
+                return;
+            }
+            seg -= 1; // icons start after the chevron
+        }
         let visible: Vec<&TrayIcon> = self.shown.iter().filter(|i| !i.hidden).collect();
         let Some(icon) = visible.get(seg) else { return };
         let mut pt = POINT::default();

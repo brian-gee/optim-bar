@@ -108,8 +108,10 @@ fn main() -> Result<()> {
         return set_autostart(false);
     }
     if std::env::args().any(|a| a == "--restore-tray") {
-        // Escape hatch: un-hide explorer's taskbar and hand tray icons back.
+        // Escape hatch: un-hide explorer's taskbar, hand tray icons back,
+        // and give monitors their full work areas back.
         tray::restore_explorer_tray();
+        bar::restore_work_areas();
         return Ok(());
     }
     if std::env::args().any(|a| a == "--version") {
@@ -155,6 +157,11 @@ fn main() -> Result<()> {
                 std::thread::sleep(std::time::Duration::from_millis(300));
                 bars = bar::create_all();
             }
+        }
+        // Graceful exit (bar menu's Exit): un-reserve work areas, then
+        // hand the tray back to explorer.
+        for b in &bars {
+            let _ = DestroyWindow(HWND(b.hwnd_val() as *mut _));
         }
         drop(bars);
         tray::restore_explorer_tray();

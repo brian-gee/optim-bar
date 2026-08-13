@@ -21,12 +21,14 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::Foundation::RECT;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, GetWindowLongPtrW, LoadCursorW, RegisterClassW, SetTimer,
-    SetWindowLongPtrW, SetWindowPos, ShowWindow, CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW,
-    GWLP_USERDATA, HWND_TOPMOST, IDC_ARROW, SWP_NOACTIVATE, SW_SHOWNA, WM_APP, WM_DESTROY,
-    WM_DISPLAYCHANGE, WM_ERASEBKGND, WM_LBUTTONUP, WM_MBUTTONUP, WM_NCCREATE, WM_PAINT,
-    WM_RBUTTONUP, WM_SIZE, WM_TIMER, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
-    WS_EX_TOPMOST, WS_POPUP,
+    AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, GetCursorPos,
+    GetWindowLongPtrW, LoadCursorW, PostQuitMessage, RegisterClassW, SetForegroundWindow, SetTimer,
+    SetWindowLongPtrW, SetWindowPos, ShowWindow, SystemParametersInfoW, TrackPopupMenu,
+    CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, HWND_TOPMOST, IDC_ARROW, MF_GRAYED,
+    MF_SEPARATOR, MF_STRING, SPIF_SENDCHANGE, SPI_SETWORKAREA, SWP_NOACTIVATE, SW_SHOWNA,
+    TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_APP, WM_DESTROY, WM_DISPLAYCHANGE,
+    WM_ERASEBKGND, WM_LBUTTONUP, WM_MBUTTONUP, WM_NCCREATE, WM_PAINT, WM_RBUTTONUP, WM_SIZE,
+    WM_TIMER, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
 use std::collections::HashMap;
@@ -42,15 +44,8 @@ use windows::Win32::Graphics::Gdi::ScreenToClient;
 use windows::Win32::Foundation::POINT;
 use windows::Win32::UI::WindowsAndMessaging::WM_MOUSEWHEEL;
 
-use windows::Win32::UI::Shell::{
-    SHAppBarMessage, ABE_BOTTOM, ABE_TOP, ABM_NEW, ABM_QUERYPOS, ABM_REMOVE, ABM_SETPOS,
-    APPBARDATA,
-};
-
 use crate::config::{self, BarConfig};
 use crate::widgets::{self, Role, Segment, Widget};
-
-pub const WM_APP_APPBAR: u32 = WM_APP + 2;
 
 /// Icon edge in logical px (matches Brian's YASB icon_size 18).
 const ICON_EDGE: f32 = 18.0;
@@ -103,6 +98,22 @@ fn monitors() -> Vec<Mon> {
     // Primary first so bar index 0 is always the main monitor.
     v.sort_by_key(|m| !m.primary);
     v
+}
+
+/// Escape-hatch companion to --restore-tray: gives every monitor its full
+/// rect back as work area (the bar process may have died without cleanup).
+pub fn restore_work_areas() {
+    for m in monitors() {
+        let mut rc = m.rect;
+        unsafe {
+            let _ = windows::Win32::UI::WindowsAndMessaging::SystemParametersInfoW(
+                SPI_SETWORKAREA,
+                0,
+                Some(&mut rc as *mut _ as *mut c_void),
+                SPIF_SENDCHANGE,
+            );
+        }
+    }
 }
 
 /// Creates one bar per monitor (or primary only), per the freshly-read config.
@@ -261,38 +272,17 @@ impl Bar {
         }
     }
 
-    /// Full-width strip on the primary monitor, top or bottom edge.
-    /// With `reserve = true` (default) the bar registers as an AppBar so
-    /// maximized windows stop at its edge instead of underlapping it.
+    /// Full-width strip on the monitor's top or bottom edge.
+    /// With `reserve = true` (default) the monitor's work area is shrunk
+    /// past the bar so maximized/tiled windows stop at its edge.
     fn position(&self) {
         unsafe {
             let mr = self.mon_rect;
             let h = (self.cfg.height * self.scale) as i32;
-            let mut y = if self.cfg.position_top { mr.top } else { mr.bottom - h };
+            let y = if self.cfg.position_top { mr.top } else { mr.bottom - h };
 
             if self.cfg.reserve {
-                let mut abd = APPBARDATA {
-                    cbSize: std::mem::size_of::<APPBARDATA>() as u32,
-                    hWnd: self.hwnd,
-                    uCallbackMessage: WM_APP_APPBAR,
-                    uEdge: if self.cfg.position_top { ABE_TOP } else { ABE_BOTTOM },
-                    rc: RECT {
-                        left: mr.left,
-                        top: if self.cfg.position_top { mr.top } else { mr.bottom - h },
-                        right: mr.right,
-                        bottom: if self.cfg.position_top { mr.top + h } else { mr.bottom },
-                    },
-                    ..Default::default()
-                };
-                SHAppBarMessage(ABM_NEW, &mut abd);
-                SHAppBarMessage(ABM_QUERYPOS, &mut abd);
-                if self.cfg.position_top {
-                    abd.rc.bottom = abd.rc.top + h;
-                } else {
-                    abd.rc.top = abd.rc.bottom - h;
-                }
-                SHAppBarMessage(ABM_SETPOS, &mut abd);
-                y = abd.rc.top;
+                self.set_work_area(true);
             }
 
             let _ = SetWindowPos(
@@ -307,14 +297,30 @@ impl Bar {
         }
     }
 
-    fn remove_appbar(&self) {
+    /// Sets this monitor's work area to exclude (or re-include) the bar.
+    /// The classic route — SHAppBarMessage — sends the ABM protocol to the
+    /// Shell_TrayWnd window, which is *us* since tray.rs took that class
+    /// over; we'd be asking ourselves and dropping the request. Write the
+    /// work area directly instead: SPI_SETWORKAREA applies to whichever
+    /// monitor contains the passed rect, and SPIF_SENDCHANGE broadcasts
+    /// WM_SETTINGCHANGE so apps (and komorebi) re-read it.
+    fn set_work_area(&self, reserve: bool) {
         unsafe {
-            let mut abd = APPBARDATA {
-                cbSize: std::mem::size_of::<APPBARDATA>() as u32,
-                hWnd: self.hwnd,
-                ..Default::default()
-            };
-            SHAppBarMessage(ABM_REMOVE, &mut abd);
+            let mut rc = self.mon_rect;
+            if reserve {
+                let h = (self.cfg.height * self.scale) as i32;
+                if self.cfg.position_top {
+                    rc.top += h;
+                } else {
+                    rc.bottom -= h;
+                }
+            }
+            let _ = SystemParametersInfoW(
+                SPI_SETWORKAREA,
+                0,
+                Some(&mut rc as *mut _ as *mut c_void),
+                SPIF_SENDCHANGE,
+            );
         }
     }
 
@@ -483,15 +489,23 @@ impl Bar {
             let mut slot_x: Vec<f32> = vec![0.0; self.slots.len()];
             let mut left_x = pad;
             let mut right_x = w - pad;
-            let center_total: f32 = self
-                .slots
-                .iter()
-                .enumerate()
-                .filter(|(_, s)| matches!(s.side, Side::Center) )
-                .map(|(i, _)| slot_widths[i] + gap)
-                .sum::<f32>()
-                - gap;
-            let mut center_x = (w - center_total.max(0.0)) / 2.0;
+            let side_total = |want: fn(&Side) -> bool| -> f32 {
+                self.slots
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, s)| want(&s.side) && slot_widths[*i] > 0.0)
+                    .map(|(i, _)| slot_widths[i] + gap)
+                    .sum::<f32>()
+                    - gap
+            };
+            let center_total = side_total(|s| matches!(s, Side::Center));
+            // Center on the full width, but never overlap the side runs
+            // (the portrait monitor is only 1080px wide).
+            let left_end = pad + side_total(|s| matches!(s, Side::Left)).max(0.0) + gap;
+            let right_start = w - pad - side_total(|s| matches!(s, Side::Right)).max(0.0) - gap;
+            let ideal = (w - center_total.max(0.0)) / 2.0;
+            let hi = (right_start - center_total.max(0.0)).max(left_end);
+            let mut center_x = ideal.clamp(left_end.min(hi), hi);
             for (i, slot) in self.slots.iter().enumerate() {
                 if slot_widths[i] == 0.0 {
                     slot_x[i] = -1.0; // hidden
@@ -593,6 +607,66 @@ impl Bar {
         if let Some((slot, seg)) = self.hit(x) {
             self.slots[slot].widget.on_click(seg, button);
             self.invalidate();
+        } else if button == 2 {
+            self.context_menu();
+        }
+    }
+
+    /// Right-click on empty bar area: YASB-style menu.
+    fn context_menu(&self) {
+        unsafe {
+            let Ok(menu) = CreatePopupMenu() else { return };
+            const ID_CONFIG: usize = 1;
+            const ID_RELOAD: usize = 2;
+            const ID_EXIT: usize = 3;
+            let title: Vec<u16> = concat!("optim-bar ", env!("CARGO_PKG_VERSION"))
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect();
+            let _ = AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, PCWSTR(title.as_ptr()));
+            let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+            let _ = AppendMenuW(menu, MF_STRING, ID_CONFIG, w!("Edit config"));
+            let _ = AppendMenuW(menu, MF_STRING, ID_RELOAD, w!("Reload"));
+            let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+            let _ = AppendMenuW(menu, MF_STRING, ID_EXIT, w!("Exit (restore taskbar)"));
+
+            let mut pt = POINT::default();
+            let _ = GetCursorPos(&mut pt);
+            // Menus dismiss on outside-click only for the foreground window.
+            let _ = SetForegroundWindow(self.hwnd);
+            let cmd = TrackPopupMenu(
+                menu,
+                TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY,
+                pt.x,
+                pt.y,
+                Some(0),
+                self.hwnd,
+                None,
+            );
+            let _ = DestroyMenu(menu);
+            match cmd.0 as usize {
+                ID_CONFIG => {
+                    let path16: Vec<u16> = config::path()
+                        .to_string_lossy()
+                        .encode_utf16()
+                        .chain(std::iter::once(0))
+                        .collect();
+                    windows::Win32::UI::Shell::ShellExecuteW(
+                        None,
+                        w!("open"),
+                        PCWSTR(path16.as_ptr()),
+                        None,
+                        None,
+                        windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL,
+                    );
+                }
+                ID_RELOAD => {
+                    // Main loop rebuilds all bars right after this message.
+                    REBUILD.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+                ID_EXIT => PostQuitMessage(0),
+                _ => {}
+            }
         }
     }
 
@@ -665,11 +739,6 @@ impl Bar {
                     }
                     LRESULT(0)
                 }
-                WM_APP_APPBAR => {
-                    // Shell notification (fullscreen app, pos change): re-assert.
-                    self.position();
-                    LRESULT(0)
-                }
                 windows::Win32::UI::WindowsAndMessaging::WM_DPICHANGED => {
                     // Bar moved to a monitor with different DPI: rescale.
                     self.scale = ((wparam.0 as u32) & 0xFFFF) as f32 / 96.0;
@@ -681,7 +750,7 @@ impl Bar {
                 WM_DESTROY => {
                     // Main loop owns bar lifetime (rebuilds on display change),
                     // so no PostQuitMessage here.
-                    self.remove_appbar();
+                    self.set_work_area(false);
                     LRESULT(0)
                 }
                 _ => DefWindowProcW(hwnd, msg, wparam, lparam),
