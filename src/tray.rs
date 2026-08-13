@@ -15,7 +15,7 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::System::Threading::GetCurrentProcessId;
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DispatchMessageW, EnumWindows, GetMessageW,
-    GetWindowThreadProcessId, PostMessageW, RegisterClassW, RegisterWindowMessageW,
+    GetWindowThreadProcessId, PostMessageW, RegisterClassW, RegisterWindowMessageW, SendMessageW,
     SendNotifyMessageW, ShowWindow, TranslateMessage, HWND_BROADCAST, MSG, SW_HIDE, SW_SHOW,
     WM_COPYDATA, WNDCLASSW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
@@ -142,6 +142,21 @@ extern "system" fn tray_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LP
                     let _ = ShowWindow(hw, SW_HIDE);
                 }
             }
+            // Keep us first in the topmost band: FindWindow("Shell_TrayWnd")
+            // walks z-order, and whichever tray it finds gets the icon and
+            // appbar traffic. Explorer periodically re-tops its own.
+            use windows::Win32::UI::WindowsAndMessaging::{
+                SetWindowPos, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+            };
+            let _ = SetWindowPos(
+                hwnd,
+                Some(HWND_TOPMOST),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            );
             return LRESULT(0);
         }
         if msg == WM_COPYDATA {
@@ -158,6 +173,15 @@ extern "system" fn tray_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LP
                 if cds.dw_data == 1 && u32_at(data, 0) == 0x34753423 {
                     return LRESULT(on_tray_data(data) as i32 as isize);
                 }
+            }
+            // Anything else — the appbar (ABM) protocol especially, dwData 0
+            // — is shell business we intercepted by owning the class. Relay
+            // to explorer's hidden tray: its appbar registry still runs, and
+            // explorer recomputes work areas from that registry, stomping
+            // anything written with raw SPI_SETWORKAREA. Being a real appbar
+            // (via this relay) is the only reservation explorer preserves.
+            if let Some(h) = explorer_main_tray() {
+                return SendMessageW(HWND(h as *mut _), WM_COPYDATA, Some(wparam), Some(lparam));
             }
             return LRESULT(0);
         }
@@ -193,10 +217,57 @@ fn explorer_trays() -> Vec<isize> {
     found.0
 }
 
+unsafe extern "system" fn find_main_tray(hwnd: HWND, lparam: LPARAM) -> windows::core::BOOL {
+    let out = &mut *(lparam.0 as *mut isize);
+    let mut class = [0u16; 64];
+    let n = windows::Win32::UI::WindowsAndMessaging::GetClassNameW(hwnd, &mut class);
+    if String::from_utf16_lossy(&class[..n.max(0) as usize]) == "Shell_TrayWnd" {
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        if pid != GetCurrentProcessId() {
+            *out = hwnd.0 as isize;
+            return false.into(); // stop enumeration
+        }
+    }
+    true.into()
+}
+
+/// Explorer's (hidden) primary taskbar window — the ABM relay target.
+fn explorer_main_tray() -> Option<isize> {
+    let mut found: isize = 0;
+    unsafe {
+        let _ = EnumWindows(Some(find_main_tray), LPARAM(&mut found as *mut _ as isize));
+    }
+    (found != 0).then_some(found)
+}
+
 fn broadcast_taskbar_created() {
     unsafe {
         let msg = RegisterWindowMessageW(w!("TaskbarCreated"));
         let _ = SendNotifyMessageW(HWND_BROADCAST, msg, WPARAM(0), LPARAM(0));
+    }
+}
+
+/// Runs `f` with our Shell_TrayWnd dropped to the bottom of the z-order,
+/// so FindWindow("Shell_TrayWnd") — which walks z-order — resolves to
+/// explorer's real tray for the duration. SHAppBarMessage needs this:
+/// explorer services state-changing ABM messages (NEW/SETPOS/REMOVE) only
+/// when they arrive directly, not via our WM_COPYDATA relay.
+pub fn with_explorer_routed<R>(f: impl FnOnce() -> R) -> R {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        SetWindowPos, HWND_BOTTOM, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+    };
+    let host = HOST_HWND.load(Ordering::Relaxed);
+    if host == 0 {
+        return f(); // host not up yet: FindWindow already resolves to explorer
+    }
+    unsafe {
+        let hw = HWND(host as *mut _);
+        let flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
+        let _ = SetWindowPos(hw, Some(HWND_BOTTOM), 0, 0, 0, 0, flags);
+        let r = f();
+        let _ = SetWindowPos(hw, Some(HWND_TOPMOST), 0, 0, 0, 0, flags);
+        r
     }
 }
 

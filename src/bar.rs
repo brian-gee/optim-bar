@@ -44,8 +44,25 @@ use windows::Win32::Graphics::Gdi::ScreenToClient;
 use windows::Win32::Foundation::POINT;
 use windows::Win32::UI::WindowsAndMessaging::WM_MOUSEWHEEL;
 
+use windows::Win32::UI::Shell::{
+    SHAppBarMessage, ABE_BOTTOM, ABE_TOP, ABM_NEW, ABM_QUERYPOS, ABM_REMOVE, ABM_SETPOS,
+    ABM_WINDOWPOSCHANGED, APPBARDATA,
+};
+
 use crate::config::{self, BarConfig};
 use crate::widgets::{self, Role, Segment, Widget};
+
+/// Appbar notification callback (ABN_* in wparam).
+pub const WM_APP_APPBAR: u32 = WM_APP + 2;
+
+/// Explorer broadcasts this on (re)start; appbar registrations die with it.
+fn taskbar_created_msg() -> u32 {
+    use std::sync::OnceLock;
+    static MSG: OnceLock<u32> = OnceLock::new();
+    *MSG.get_or_init(|| unsafe {
+        windows::Win32::UI::WindowsAndMessaging::RegisterWindowMessageW(w!("TaskbarCreated"))
+    })
+}
 
 /// Icon edge in logical px (matches Brian's YASB icon_size 18).
 const ICON_EDGE: f32 = 18.0;
@@ -63,6 +80,9 @@ struct Mon {
     handle: isize,
     rect: windows::Win32::Foundation::RECT,
     primary: bool,
+    /// Hardware id, e.g. "MONITOR\SAM78B7\..." — stable across reboots,
+    /// unlike \\.\DISPLAYn numbering. Matched by `exclude =`.
+    device_id: String,
 }
 
 unsafe extern "system" fn mon_cb(
@@ -71,16 +91,30 @@ unsafe extern "system" fn mon_cb(
     _rc: *mut windows::Win32::Foundation::RECT,
     lparam: LPARAM,
 ) -> windows::core::BOOL {
+    use windows::Win32::Graphics::Gdi::{
+        EnumDisplayDevicesW, GetMonitorInfoW, DISPLAY_DEVICEW, MONITORINFO, MONITORINFOEXW,
+    };
     let out = &mut *(lparam.0 as *mut Vec<Mon>);
-    let mut mi = windows::Win32::Graphics::Gdi::MONITORINFO {
-        cbSize: std::mem::size_of::<windows::Win32::Graphics::Gdi::MONITORINFO>() as u32,
+    let mut mi = MONITORINFOEXW::default();
+    mi.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
+    let _ = GetMonitorInfoW(hmon, &mut mi as *mut _ as *mut MONITORINFO);
+    let mut dd = DISPLAY_DEVICEW {
+        cb: std::mem::size_of::<DISPLAY_DEVICEW>() as u32,
         ..Default::default()
     };
-    let _ = windows::Win32::Graphics::Gdi::GetMonitorInfoW(hmon, &mut mi);
+    let device_id = if EnumDisplayDevicesW(PCWSTR(mi.szDevice.as_ptr()), 0, &mut dd, 0).as_bool()
+    {
+        let id = &dd.DeviceID;
+        let len = id.iter().position(|&c| c == 0).unwrap_or(id.len());
+        String::from_utf16_lossy(&id[..len])
+    } else {
+        String::new()
+    };
     out.push(Mon {
         handle: hmon.0 as isize,
-        rect: mi.rcMonitor,
-        primary: mi.dwFlags & 1 != 0, // MONITORINFOF_PRIMARY
+        rect: mi.monitorInfo.rcMonitor,
+        primary: mi.monitorInfo.dwFlags & 1 != 0, // MONITORINFOF_PRIMARY
+        device_id,
     });
     true.into()
 }
@@ -116,19 +150,29 @@ pub fn restore_work_areas() {
     }
 }
 
-/// Creates one bar per monitor (or primary only), per the freshly-read config.
+/// Creates one bar per monitor (or primary only), per the freshly-read
+/// config. Monitors whose device id contains an `exclude =` entry get none.
 pub fn create_all() -> Vec<Box<Bar>> {
+    let cfg = config::load();
     let mons = monitors();
     let mut bars = Vec::new();
-    for (i, mon) in mons.iter().enumerate() {
-        if i > 0 {
-            let cfg = config::load();
-            if !cfg.all_monitors {
-                break;
-            }
+    let mut index = 0;
+    for mon in mons.iter() {
+        if cfg
+            .exclude
+            .iter()
+            .any(|e| mon.device_id.to_lowercase().contains(&e.to_lowercase()))
+        {
+            continue;
         }
-        match Bar::create(i, mon.handle, mon.rect) {
-            Ok(b) => bars.push(b),
+        if index > 0 && !cfg.all_monitors {
+            break;
+        }
+        match Bar::create(index, mon.handle, mon.rect) {
+            Ok(b) => {
+                bars.push(b);
+                index += 1;
+            }
             Err(_) => continue,
         }
     }
@@ -190,6 +234,8 @@ pub struct Bar {
     mon_rect: RECT,
     /// Bar is hidden because a fullscreen app owns this monitor.
     fs_hidden: bool,
+    /// Last work-area re-assertion, throttling the self-heal.
+    last_assert: std::time::Instant,
 }
 
 impl Bar {
@@ -224,6 +270,7 @@ impl Bar {
                 monitor,
                 mon_rect,
                 fs_hidden: false,
+                last_assert: std::time::Instant::now(),
             });
             bar.build_slots();
 
@@ -276,16 +323,42 @@ impl Bar {
     }
 
     /// Full-width strip on the monitor's top or bottom edge.
-    /// With `reserve = true` (default) the monitor's work area is shrunk
-    /// past the bar so maximized/tiled windows stop at its edge.
+    /// With `reserve = true` (default) the bar registers as an AppBar.
+    /// Raw SPI_SETWORKAREA writes don't survive: explorer recomputes work
+    /// areas from its appbar registry on shell events and erases anything
+    /// it doesn't know about. SHAppBarMessage still works because tray.rs
+    /// relays ABM WM_COPYDATA traffic to explorer's hidden tray window.
     fn position(&self) {
         unsafe {
             let mr = self.mon_rect;
             let h = (self.cfg.height * self.scale) as i32;
-            let y = if self.cfg.position_top { mr.top } else { mr.bottom - h };
+            let mut y = if self.cfg.position_top { mr.top } else { mr.bottom - h };
 
             if self.cfg.reserve {
-                self.set_work_area(true);
+                let mut abd = APPBARDATA {
+                    cbSize: std::mem::size_of::<APPBARDATA>() as u32,
+                    hWnd: self.hwnd,
+                    uCallbackMessage: WM_APP_APPBAR,
+                    uEdge: if self.cfg.position_top { ABE_TOP } else { ABE_BOTTOM },
+                    rc: RECT {
+                        left: mr.left,
+                        top: if self.cfg.position_top { mr.top } else { mr.bottom - h },
+                        right: mr.right,
+                        bottom: if self.cfg.position_top { mr.top + h } else { mr.bottom },
+                    },
+                    ..Default::default()
+                };
+                y = crate::tray::with_explorer_routed(|| {
+                    SHAppBarMessage(ABM_NEW, &mut abd); // no-op if already registered
+                    SHAppBarMessage(ABM_QUERYPOS, &mut abd);
+                    if self.cfg.position_top {
+                        abd.rc.bottom = abd.rc.top + h;
+                    } else {
+                        abd.rc.top = abd.rc.bottom - h;
+                    }
+                    SHAppBarMessage(ABM_SETPOS, &mut abd);
+                    abd.rc.top
+                });
             }
 
             let _ = SetWindowPos(
@@ -297,33 +370,55 @@ impl Bar {
                 h,
                 SWP_NOACTIVATE,
             );
+
+            if self.cfg.reserve {
+                // The "I moved, recompute work areas" kick. Registration
+                // alone can get lost in the shell churn our own startup
+                // causes (taskbar hiding + TaskbarCreated broadcast).
+                let mut abd = APPBARDATA {
+                    cbSize: std::mem::size_of::<APPBARDATA>() as u32,
+                    hWnd: self.hwnd,
+                    ..Default::default()
+                };
+                crate::tray::with_explorer_routed(|| {
+                    SHAppBarMessage(ABM_WINDOWPOSCHANGED, &mut abd);
+                });
+            }
         }
     }
 
-    /// Sets this monitor's work area to exclude (or re-include) the bar.
-    /// The classic route — SHAppBarMessage — sends the ABM protocol to the
-    /// Shell_TrayWnd window, which is *us* since tray.rs took that class
-    /// over; we'd be asking ourselves and dropping the request. Write the
-    /// work area directly instead: SPI_SETWORKAREA applies to whichever
-    /// monitor contains the passed rect, and SPIF_SENDCHANGE broadcasts
-    /// WM_SETTINGCHANGE so apps (and komorebi) re-read it.
-    fn set_work_area(&self, reserve: bool) {
+    /// Whether the shell currently honors our reservation: the work area
+    /// must start below (or end above) the bar strip. `>=` because another
+    /// appbar may legitimately reserve more.
+    fn work_area_ok(&self) -> bool {
+        use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, HMONITOR, MONITORINFO};
         unsafe {
-            let mut rc = self.mon_rect;
-            if reserve {
-                let h = (self.cfg.height * self.scale) as i32;
-                if self.cfg.position_top {
-                    rc.top += h;
-                } else {
-                    rc.bottom -= h;
-                }
+            let mut mi = MONITORINFO {
+                cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                ..Default::default()
+            };
+            if !GetMonitorInfoW(HMONITOR(self.monitor as *mut _), &mut mi).as_bool() {
+                return true; // monitor gone; rebuild will handle it
             }
-            let _ = SystemParametersInfoW(
-                SPI_SETWORKAREA,
-                0,
-                Some(&mut rc as *mut _ as *mut c_void),
-                SPIF_SENDCHANGE,
-            );
+            let h = (self.cfg.height * self.scale) as i32;
+            if self.cfg.position_top {
+                mi.rcWork.top >= self.mon_rect.top + h
+            } else {
+                mi.rcWork.bottom <= self.mon_rect.bottom - h
+            }
+        }
+    }
+
+    fn remove_appbar(&self) {
+        unsafe {
+            let mut abd = APPBARDATA {
+                cbSize: std::mem::size_of::<APPBARDATA>() as u32,
+                hWnd: self.hwnd,
+                ..Default::default()
+            };
+            crate::tray::with_explorer_routed(|| {
+                SHAppBarMessage(ABM_REMOVE, &mut abd);
+            });
         }
     }
 
@@ -731,6 +826,18 @@ impl Bar {
                         self.fs_hidden = fs;
                         let _ = ShowWindow(self.hwnd, if fs { SW_HIDE } else { SW_SHOWNA });
                     }
+                    // Self-heal the reservation: explorer recomputes work
+                    // areas from its appbar registry on shell events and can
+                    // briefly lose ours. Throttled so a genuinely refused
+                    // reservation doesn't turn into a SETPOS storm.
+                    if self.cfg.reserve
+                        && !self.fs_hidden
+                        && !self.work_area_ok()
+                        && self.last_assert.elapsed().as_secs() >= 2
+                    {
+                        self.last_assert = std::time::Instant::now();
+                        self.position();
+                    }
                     let mut dirty = false;
                     for slot in &mut self.slots {
                         dirty |= slot.widget.tick();
@@ -791,10 +898,20 @@ impl Bar {
                     self.invalidate();
                     LRESULT(0)
                 }
+                WM_APP_APPBAR => {
+                    // Shell notification (pos change, fullscreen): re-assert.
+                    self.position();
+                    LRESULT(0)
+                }
                 WM_DESTROY => {
                     // Main loop owns bar lifetime (rebuilds on display change),
                     // so no PostQuitMessage here.
-                    self.set_work_area(false);
+                    self.remove_appbar();
+                    LRESULT(0)
+                }
+                m if m == taskbar_created_msg() => {
+                    // Explorer restarted: its appbar registry is empty now.
+                    self.position();
                     LRESULT(0)
                 }
                 _ => DefWindowProcW(hwnd, msg, wparam, lparam),

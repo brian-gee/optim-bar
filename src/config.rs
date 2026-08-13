@@ -85,6 +85,8 @@ pub struct BarConfig {
     pub reserve: bool,
     /// "all" (default) or "primary".
     pub all_monitors: bool,
+    /// Device-id substrings of monitors that never get a bar.
+    pub exclude: Vec<String>,
     pub font: String,
     pub font_size: f32,
     pub bg: (u32, f32),
@@ -131,6 +133,7 @@ height = 36
 position = top
 reserve = true           # register as AppBar: maximized windows stop at the bar
 monitors = all           # 'all' or 'primary'
+# exclude =              # device-id substrings that never get a bar, e.g. SAM78B7
 # per-monitor widget overrides: add [left.1] / [center.1] / [right.1]
 # sections with their own `widgets =` line; monitors without one inherit
 font = JetBrainsMono NFP
@@ -176,6 +179,7 @@ pub fn load() -> BarConfig {
         position_top: ini.get_or("bar", "position", "bottom") == "top",
         reserve: ini.get_or("bar", "reserve", "true") != "false",
         all_monitors: ini.get_or("bar", "monitors", "all") != "primary",
+        exclude: ini.get_list("bar", "exclude"),
         font: ini.get_or("bar", "font", "JetBrainsMono NFP"),
         font_size: ini.get_f32("bar", "font_size", 13.0).clamp(8.0, 24.0),
         bg: ini.get_color("bar", "bg", (0x181825, 0.85)),
