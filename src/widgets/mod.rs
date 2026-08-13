@@ -2,6 +2,7 @@ pub mod clock;
 pub mod exec;
 pub mod komorebi;
 pub mod lhm;
+pub mod mic;
 pub mod stats;
 pub mod systray;
 pub mod tasks;
@@ -74,6 +75,7 @@ pub fn build(
         "gpu_temp" => Some(Box::new(stats::GpuTemp::new(cfg, &section))),
         "lhm" => Some(Box::new(lhm::Lhm::new(cfg, &section))),
         "volume" => Some(Box::new(volume::Volume::new(cfg, &section))),
+        "mic" => Some(Box::new(mic::Mic::new(cfg, &section))),
         "tasks" => Some(Box::new(tasks::Tasks::new(cfg, &section, monitor))),
         "systray" => Some(Box::new(systray::Systray::new(cfg, &section))),
         _ => None,
