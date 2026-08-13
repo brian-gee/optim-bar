@@ -51,6 +51,15 @@ pub trait Widget {
 
     /// Wheel over the widget; delta in WHEEL_DELTA units (+up / -down).
     fn on_wheel(&mut self, _delta: i32) {}
+
+    /// Global hotkey this widget wants, as (MOD_* bits, VK). Registered by
+    /// the primary bar only; fires on_hotkey().
+    fn hotkey_spec(&self) -> Option<(u32, u32)> {
+        None
+    }
+
+    /// The widget's registered global hotkey fired.
+    fn on_hotkey(&mut self) {}
 }
 
 /// Instantiate a widget by config name (the strings in [left]/[center]/[right]).

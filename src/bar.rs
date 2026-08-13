@@ -27,7 +27,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, HWND_TOPMOST, IDC_ARROW, MF_GRAYED,
     MF_SEPARATOR, MF_STRING, SPIF_SENDCHANGE, SPI_SETWORKAREA, SWP_NOACTIVATE, SW_HIDE, SW_SHOWNA,
     TPM_NONOTIFY, TPM_RETURNCMD, TPM_RIGHTBUTTON, WM_APP, WM_DESTROY, WM_DISPLAYCHANGE,
-    WM_ERASEBKGND, WM_LBUTTONUP, WM_MBUTTONUP, WM_NCCREATE, WM_PAINT, WM_RBUTTONUP, WM_SIZE,
+    WM_ERASEBKGND, WM_HOTKEY, WM_LBUTTONUP, WM_MBUTTONUP, WM_NCCREATE, WM_PAINT, WM_RBUTTONUP,
+    WM_SIZE,
     WM_TIMER, WNDCLASSW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
 
@@ -287,6 +288,7 @@ impl Bar {
             )?;
             bar.hwnd = hwnd;
             bar.scale = GetDpiForWindow(hwnd) as f32 / 96.0;
+            bar.register_hotkeys();
             bar.position();
 
             let _ = ShowWindow(hwnd, SW_SHOWNA);
@@ -317,6 +319,30 @@ impl Bar {
                             _ => Side::Right,
                         },
                     });
+                }
+            }
+        }
+    }
+
+    /// Global hotkeys, id = slot index. Primary bar only, so the same
+    /// widget on three monitors doesn't fight over one registration.
+    /// MUST run after CreateWindowExW: a null-hwnd registration binds to
+    /// the thread, and DispatchMessage drops thread-queue WM_HOTKEY.
+    fn register_hotkeys(&self) {
+        if self.index != 0 {
+            return;
+        }
+        use windows::Win32::UI::Input::KeyboardAndMouse::{RegisterHotKey, HOT_KEY_MODIFIERS};
+        const MOD_NOREPEAT: u32 = 0x4000;
+        for (i, slot) in self.slots.iter().enumerate() {
+            if let Some((mods, vk)) = slot.widget.hotkey_spec() {
+                unsafe {
+                    let _ = RegisterHotKey(
+                        Some(self.hwnd),
+                        i as i32,
+                        HOT_KEY_MODIFIERS(mods | MOD_NOREPEAT),
+                        vk,
+                    );
                 }
             }
         }
@@ -936,6 +962,13 @@ impl Bar {
                     self.gfx = None;
                     self.position();
                     self.invalidate();
+                    LRESULT(0)
+                }
+                WM_HOTKEY => {
+                    if let Some(slot) = self.slots.get_mut(wparam.0) {
+                        slot.widget.on_hotkey();
+                        self.invalidate();
+                    }
                     LRESULT(0)
                 }
                 WM_APP_APPBAR => {

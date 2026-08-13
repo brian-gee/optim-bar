@@ -1,6 +1,44 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+/// "ctrl+shift+m" / "f13" -> (MOD_* bits, VK code). Modifiers optional only
+/// for F13-F24, which can't hijack normal typing; everything else needs at
+/// least one of ctrl/alt/shift/win.
+pub fn parse_hotkey(v: &str) -> Option<(u32, u32)> {
+    let v = v.to_lowercase();
+    let parts: Vec<&str> = v.split('+').map(str::trim).collect();
+    let (key, mods_parts) = parts.split_last()?;
+    let mut mods = 0u32;
+    for m in mods_parts {
+        mods |= match *m {
+            "alt" => 0x0001,
+            "ctrl" | "control" => 0x0002,
+            "shift" => 0x0004,
+            "win" => 0x0008,
+            _ => return None,
+        };
+    }
+    let vk = match *key {
+        "space" => 0x20,
+        k if k.len() == 1 && k.chars().next().unwrap().is_ascii_alphanumeric() => {
+            k.to_uppercase().bytes().next().unwrap() as u32
+        }
+        k if k.starts_with('f') => {
+            let n: u32 = k[1..].parse().ok()?;
+            if (1..=24).contains(&n) {
+                0x70 + n - 1
+            } else {
+                return None;
+            }
+        }
+        _ => return None,
+    };
+    if mods == 0 && !(0x7C..=0x87).contains(&vk) {
+        return None; // unmodified non-F13..F24 keys would hijack typing
+    }
+    Some((mods, vk))
+}
+
 /// Sectioned INI: `[section]` headers, `key = value` lines, `#` comments.
 /// Section "widget.foo" holds per-widget options; bare keys before any
 /// section header land in the implicit "bar" section.

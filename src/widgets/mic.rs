@@ -34,6 +34,7 @@ pub struct Mic {
     icon_muted: String,
     muted: Option<bool>, // None = no capture device
     ticks: u32,
+    hotkey: Option<(u32, u32)>,
 }
 
 impl Mic {
@@ -44,7 +45,24 @@ impl Mic {
             icon_muted: cfg.ini.get_or(section, "icon_muted", "\u{f131}"),
             muted: None,
             ticks: 0,
+            hotkey: cfg
+                .ini
+                .get(section, "hotkey")
+                .and_then(crate::config::parse_hotkey),
         }
+    }
+
+    fn toggle_mute(&mut self) {
+        unsafe {
+            if self.ep.is_none() {
+                self.ep = endpoint();
+            }
+            if let Some(ep) = &self.ep {
+                let mute = ep.GetMute().map(|m| m.as_bool()).unwrap_or(false);
+                let _ = ep.SetMute(!mute, std::ptr::null());
+            }
+        }
+        self.refresh();
     }
 
     fn refresh(&mut self) -> bool {
@@ -89,15 +107,16 @@ impl Widget for Mic {
     }
 
     fn on_click(&mut self, _seg: usize, button: u8) {
-        if button != 0 && button != 2 {
-            return;
+        if button == 0 || button == 2 {
+            self.toggle_mute();
         }
-        unsafe {
-            if let Some(ep) = &self.ep {
-                let mute = ep.GetMute().map(|m| m.as_bool()).unwrap_or(false);
-                let _ = ep.SetMute(!mute, std::ptr::null());
-            }
-        }
-        self.refresh();
+    }
+
+    fn hotkey_spec(&self) -> Option<(u32, u32)> {
+        self.hotkey
+    }
+
+    fn on_hotkey(&mut self) {
+        self.toggle_mute();
     }
 }
