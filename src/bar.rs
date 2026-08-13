@@ -6,7 +6,7 @@ use windows::Win32::Graphics::Direct2D::Common::{D2D1_COLOR_F, D2D_RECT_F, D2D_S
 use windows::Win32::Graphics::Direct2D::{
     D2D1CreateFactory, ID2D1Factory, ID2D1HwndRenderTarget, ID2D1SolidColorBrush,
     D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_HWND_RENDER_TARGET_PROPERTIES,
-    D2D1_PRESENT_OPTIONS_NONE, D2D1_RENDER_TARGET_PROPERTIES,
+    D2D1_PRESENT_OPTIONS_NONE, D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_SOFTWARE,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWriteCreateFactory, IDWriteFactory, IDWriteTextFormat, DWRITE_FACTORY_TYPE_SHARED,
@@ -41,8 +41,15 @@ use windows::Win32::Graphics::Gdi::ScreenToClient;
 use windows::Win32::Foundation::POINT;
 use windows::Win32::UI::WindowsAndMessaging::WM_MOUSEWHEEL;
 
+use windows::Win32::UI::Shell::{
+    SHAppBarMessage, ABE_BOTTOM, ABE_TOP, ABM_NEW, ABM_QUERYPOS, ABM_REMOVE, ABM_SETPOS,
+    APPBARDATA,
+};
+
 use crate::config::{self, BarConfig};
 use crate::widgets::{self, Role, Segment, Widget};
+
+pub const WM_APP_APPBAR: u32 = WM_APP + 2;
 
 /// Icon edge in logical px (matches Brian's YASB icon_size 18).
 const ICON_EDGE: f32 = 18.0;
@@ -184,12 +191,40 @@ impl Bar {
     }
 
     /// Full-width strip on the primary monitor, top or bottom edge.
+    /// With `reserve = true` (default) the bar registers as an AppBar so
+    /// maximized windows stop at its edge instead of underlapping it.
     fn position(&self) {
         unsafe {
             let screen_w = GetSystemMetrics(SM_CXSCREEN);
             let screen_h = GetSystemMetrics(SM_CYSCREEN);
             let h = (self.cfg.height * self.scale) as i32;
-            let y = if self.cfg.position_top { 0 } else { screen_h - h };
+            let mut y = if self.cfg.position_top { 0 } else { screen_h - h };
+
+            if self.cfg.reserve {
+                let mut abd = APPBARDATA {
+                    cbSize: std::mem::size_of::<APPBARDATA>() as u32,
+                    hWnd: self.hwnd,
+                    uCallbackMessage: WM_APP_APPBAR,
+                    uEdge: if self.cfg.position_top { ABE_TOP } else { ABE_BOTTOM },
+                    rc: windows::Win32::Foundation::RECT {
+                        left: 0,
+                        top: if self.cfg.position_top { 0 } else { screen_h - h },
+                        right: screen_w,
+                        bottom: if self.cfg.position_top { h } else { screen_h },
+                    },
+                    ..Default::default()
+                };
+                SHAppBarMessage(ABM_NEW, &mut abd);
+                SHAppBarMessage(ABM_QUERYPOS, &mut abd);
+                if self.cfg.position_top {
+                    abd.rc.bottom = abd.rc.top + h;
+                } else {
+                    abd.rc.top = abd.rc.bottom - h;
+                }
+                SHAppBarMessage(ABM_SETPOS, &mut abd);
+                y = abd.rc.top;
+            }
+
             let _ = SetWindowPos(
                 self.hwnd,
                 Some(HWND_TOPMOST),
@@ -199,6 +234,17 @@ impl Bar {
                 h,
                 SWP_NOACTIVATE,
             );
+        }
+    }
+
+    fn remove_appbar(&self) {
+        unsafe {
+            let mut abd = APPBARDATA {
+                cbSize: std::mem::size_of::<APPBARDATA>() as u32,
+                hWnd: self.hwnd,
+                ..Default::default()
+            };
+            SHAppBarMessage(ABM_REMOVE, &mut abd);
         }
     }
 
@@ -212,6 +258,10 @@ impl Bar {
             let h = (self.cfg.height * self.scale) as u32;
             let rt = self.d2d_factory.CreateHwndRenderTarget(
                 &D2D1_RENDER_TARGET_PROPERTIES {
+                    // Software raster: a 36px strip repainting ~1/s doesn't
+                    // need a GPU context (the NVIDIA D3D device costs ~40 MB
+                    // of private bytes per process).
+                    r#type: D2D1_RENDER_TARGET_TYPE_SOFTWARE,
                     dpiX: 96.0,
                     dpiY: 96.0,
                     ..Default::default()
@@ -551,7 +601,13 @@ impl Bar {
                     }
                     LRESULT(0)
                 }
+                WM_APP_APPBAR => {
+                    // Shell notification (fullscreen app, pos change): re-assert.
+                    self.position();
+                    LRESULT(0)
+                }
                 WM_DESTROY => {
+                    self.remove_appbar();
                     PostQuitMessage(0);
                     LRESULT(0)
                 }

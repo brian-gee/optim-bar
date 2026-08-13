@@ -82,6 +82,7 @@ impl Ini {
 pub struct BarConfig {
     pub height: f32,
     pub position_top: bool,
+    pub reserve: bool,
     pub font: String,
     pub font_size: f32,
     pub bg: (u32, f32),
@@ -103,7 +104,8 @@ const DEFAULT_FILE: &str = "\
 
 [bar]
 height = 36
-position = bottom        # 'top' when replacing the yasb bar
+position = top
+reserve = true           # register as AppBar: maximized windows stop at the bar
 font = JetBrainsMono NFP
 font_size = 13
 bg = 181825D9            # RGBA — mantle, ~85% opacity
@@ -145,6 +147,7 @@ pub fn load() -> BarConfig {
     BarConfig {
         height: ini.get_f32("bar", "height", 36.0).clamp(20.0, 80.0),
         position_top: ini.get_or("bar", "position", "bottom") == "top",
+        reserve: ini.get_or("bar", "reserve", "true") != "false",
         font: ini.get_or("bar", "font", "JetBrainsMono NFP"),
         font_size: ini.get_f32("bar", "font_size", 13.0).clamp(8.0, 24.0),
         bg: ini.get_color("bar", "bg", (0x181825, 0.85)),
