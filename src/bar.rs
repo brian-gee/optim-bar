@@ -56,6 +56,20 @@ use crate::widgets::{self, Role, Segment, Widget};
 /// Appbar notification callback (ABN_* in wparam).
 pub const WM_APP_APPBAR: u32 = WM_APP + 2;
 
+/// ShellExecute "open" on an exe name or ms-settings: URI.
+fn shell_open(what: PCWSTR) {
+    unsafe {
+        windows::Win32::UI::Shell::ShellExecuteW(
+            None,
+            w!("open"),
+            what,
+            None,
+            None,
+            windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL,
+        );
+    }
+}
+
 /// Explorer broadcasts this on (re)start; appbar registrations die with it.
 fn taskbar_created_msg() -> u32 {
     use std::sync::OnceLock;
@@ -819,11 +833,20 @@ impl Bar {
             const ID_CONFIG: usize = 1;
             const ID_RELOAD: usize = 2;
             const ID_EXIT: usize = 3;
+            const ID_TASKMGR: usize = 4;
+            const ID_DISPLAY: usize = 5;
+            const ID_SOUND: usize = 6;
+            const ID_PERSONALIZE: usize = 7;
             let title: Vec<u16> = concat!("optim-bar ", env!("CARGO_PKG_VERSION"))
                 .encode_utf16()
                 .chain(std::iter::once(0))
                 .collect();
             let _ = AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, PCWSTR(title.as_ptr()));
+            let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
+            let _ = AppendMenuW(menu, MF_STRING, ID_TASKMGR, w!("Task Manager"));
+            let _ = AppendMenuW(menu, MF_STRING, ID_DISPLAY, w!("Display settings"));
+            let _ = AppendMenuW(menu, MF_STRING, ID_SOUND, w!("Sound settings"));
+            let _ = AppendMenuW(menu, MF_STRING, ID_PERSONALIZE, w!("Personalization"));
             let _ = AppendMenuW(menu, MF_SEPARATOR, 0, PCWSTR::null());
             let _ = AppendMenuW(menu, MF_STRING, ID_CONFIG, w!("Edit config"));
             let _ = AppendMenuW(menu, MF_STRING, ID_RELOAD, w!("Reload"));
@@ -865,6 +888,10 @@ impl Bar {
                     REBUILD.store(true, std::sync::atomic::Ordering::Relaxed);
                 }
                 ID_EXIT => PostQuitMessage(0),
+                ID_TASKMGR => shell_open(w!("taskmgr.exe")),
+                ID_DISPLAY => shell_open(w!("ms-settings:display")),
+                ID_SOUND => shell_open(w!("ms-settings:sound")),
+                ID_PERSONALIZE => shell_open(w!("ms-settings:personalization")),
                 _ => {}
             }
         }
