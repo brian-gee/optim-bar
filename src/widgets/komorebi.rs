@@ -152,10 +152,42 @@ fn subscribe(
                 continue;
             }
 
-            seed(&state, hmonitor, override_mon);
-            spawn_hidden(&format!("komorebic subscribe-pipe {pipe_name}"));
+            // Register with komorebi, retrying until it's actually running —
+            // at boot the bar regularly starts seconds before komorebi, and
+            // a failed fire-and-forget registration used to leave the
+            // blocking ConnectNamedPipe below waiting forever ("offline").
+            let mut registered = false;
+            while alive.load(Ordering::Relaxed) {
+                let ok = std::process::Command::new("komorebic")
+                    .args(["subscribe-pipe", &pipe_name])
+                    .creation_flags_hidden()
+                    .output()
+                    .map(|o| o.status.success())
+                    .unwrap_or(false);
+                if ok {
+                    registered = true;
+                    break;
+                }
+                std::thread::sleep(Duration::from_secs(3));
+            }
+            if !registered {
+                let _ = CloseHandle(pipe);
+                continue; // alive turned false; loop exits above
+            }
 
-            if ConnectNamedPipe(pipe, None).is_ok() {
+            seed(&state, hmonitor, override_mon);
+
+            // komorebi may have connected the instant we registered, before
+            // we reach ConnectNamedPipe — that surfaces as
+            // ERROR_PIPE_CONNECTED, which IS a successful connection.
+            let connected = match ConnectNamedPipe(pipe, None) {
+                Ok(()) => true,
+                Err(e) => {
+                    e.code()
+                        == windows::Win32::Foundation::ERROR_PIPE_CONNECTED.to_hresult()
+                }
+            };
+            if connected {
                 let mut acc: Vec<u8> = Vec::new();
                 let mut buf = [0u8; 16384];
                 loop {
