@@ -135,6 +135,17 @@ fn on_tray_data(data: &[u8]) -> bool {
 extern "system" fn tray_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     unsafe {
         if msg == windows::Win32::UI::WindowsAndMessaging::WM_TIMER {
+            // Prune icons whose owning window died without NIM_DELETE
+            // (crashed or force-killed apps leave ghosts otherwise) —
+            // explorer does the same validation.
+            if let Ok(mut icons) = state().lock() {
+                icons.retain(|i| {
+                    windows::Win32::UI::WindowsAndMessaging::IsWindow(Some(HWND(
+                        i.owner as isize as *mut _,
+                    )))
+                    .as_bool()
+                });
+            }
             // Explorer re-shows its taskbars on some shell events; re-assert.
             for h in explorer_trays() {
                 let hw = HWND(h as *mut _);
