@@ -86,6 +86,7 @@ impl Widget for Systray {
                         text: String::new(),
                         role: Role::Fg,
                         icon: Some((key, px.clone())),
+                        fill: None,
                     },
                     None => Segment::text("\u{f111}", Role::Dim),
                 }

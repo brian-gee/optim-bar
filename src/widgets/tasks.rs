@@ -4,12 +4,12 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use windows::Win32::Foundation::{HWND, LPARAM, POINT, WPARAM};
+use windows::Win32::Foundation::{HWND, LPARAM, WPARAM};
 use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
 use windows::Win32::Graphics::Gdi::{
-    CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC, MonitorFromPoint,
-    MonitorFromWindow, ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB,
-    DIB_RGB_COLORS, HGDIOBJ, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTOPRIMARY,
+    CreateCompatibleDC, CreateDIBSection, DeleteDC, DeleteObject, GetDC, MonitorFromWindow,
+    ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HGDIOBJ,
+    MONITOR_DEFAULTTONEAREST,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     DrawIconEx, EnumWindows, GetClassLongPtrW, GetForegroundWindow, GetWindow,
@@ -23,11 +23,12 @@ use crate::config::BarConfig;
 use crate::widgets::{Segment, Widget};
 
 struct EnumCtx {
-    monitor: isize,
+    /// None = every monitor (the switcher wants the whole desktop).
+    monitor: Option<isize>,
     out: Vec<isize>,
 }
 
-/// EnumWindows sink: collects candidate top-level windows on one monitor.
+/// EnumWindows sink: collects candidate top-level windows.
 unsafe extern "system" fn enum_cb(hwnd: HWND, lparam: LPARAM) -> windows::core::BOOL {
     let ctx = &mut *(lparam.0 as *mut EnumCtx);
     if !IsWindowVisible(hwnd).as_bool() {
@@ -54,11 +55,26 @@ unsafe extern "system" fn enum_cb(hwnd: HWND, lparam: LPARAM) -> windows::core::
         return true.into();
     }
     // Only windows on this bar's monitor.
-    if MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST).0 as isize != ctx.monitor {
-        return true.into();
+    if let Some(mon) = ctx.monitor {
+        if MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST).0 as isize != mon {
+            return true.into();
+        }
     }
     ctx.out.push(hwnd.0 as isize);
     true.into()
+}
+
+/// Candidate top-level windows in Z-order (topmost first). `monitor` limits
+/// the result to one monitor handle; None returns the whole desktop.
+pub fn enumerate(monitor: Option<isize>) -> Vec<isize> {
+    let mut ctx = EnumCtx {
+        monitor,
+        out: Vec::new(),
+    };
+    unsafe {
+        let _ = EnumWindows(Some(enum_cb), LPARAM(&mut ctx as *mut _ as isize));
+    }
+    ctx.out
 }
 
 /// Renders an HICON into 32x32 premultiplied BGRA.
@@ -125,7 +141,7 @@ pub fn icon_pixels(hicon: HICON) -> Option<Vec<u8>> {
     }
 }
 
-fn window_icon(hwnd: HWND) -> Option<Vec<u8>> {
+pub fn window_icon(hwnd: HWND) -> Option<Vec<u8>> {
     unsafe {
         let mut result = 0usize;
         let _ = SendMessageTimeoutW(
@@ -149,7 +165,7 @@ fn window_icon(hwnd: HWND) -> Option<Vec<u8>> {
 }
 
 pub struct Tasks {
-    monitor: isize,
+    monitor: Option<isize>,
     windows: Vec<isize>,
     icons: HashMap<isize, Option<Arc<Vec<u8>>>>,
     ticks: u32,
@@ -158,7 +174,7 @@ pub struct Tasks {
 impl Tasks {
     pub fn new(_cfg: &BarConfig, _section: &str, monitor: isize) -> Tasks {
         Tasks {
-            monitor,
+            monitor: Some(monitor),
             windows: Vec::new(),
             icons: HashMap::new(),
             ticks: 0,
@@ -172,14 +188,7 @@ impl Widget for Tasks {
         // Enumerate every 250 ms tick — enumeration is cheap; it's icon
         // extraction that costs, and that's cached below. This is what makes
         // desktop switches feel instant.
-        let mut ctx = EnumCtx {
-            monitor: self.monitor,
-            out: Vec::new(),
-        };
-        unsafe {
-            let _ = EnumWindows(Some(enum_cb), LPARAM(&mut ctx as *mut _ as isize));
-        }
-        let fresh = ctx.out;
+        let fresh = enumerate(self.monitor);
         // The icon cache survives workspace switches: a window that cloaks
         // and comes back keeps its pixels, no re-fetch. Prune only entries
         // whose window is actually gone (every ~30 s), so the map stays
@@ -216,6 +225,7 @@ impl Widget for Tasks {
                         text: String::new(),
                         role: crate::widgets::Role::Fg,
                         icon: Some(ic),
+                        fill: None,
                     },
                     // No icon extractable: two-char stand-in keeps it clickable.
                     None => Segment::text("\u{eb7f}", crate::widgets::Role::Dim),

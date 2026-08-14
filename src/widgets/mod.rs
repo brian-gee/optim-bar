@@ -27,6 +27,10 @@ pub struct Segment {
     pub text: String,
     pub role: Role,
     pub icon: Option<(u64, Arc<Vec<u8>>)>,
+    /// Background pill drawn behind the segment's cell, as RGB. Two light
+    /// Catppuccin text colors are near-indistinguishable at a glance, so
+    /// "this one is selected" needs a fill, not another foreground shade.
+    pub fill: Option<u32>,
 }
 
 impl Segment {
@@ -35,7 +39,13 @@ impl Segment {
             text: t.into(),
             role,
             icon: None,
+            fill: None,
         }
+    }
+
+    pub fn with_fill(mut self, rgb: u32) -> Segment {
+        self.fill = Some(rgb);
+        self
     }
 }
 

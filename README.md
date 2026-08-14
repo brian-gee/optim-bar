@@ -15,6 +15,11 @@ context — a single small exe rendering with software Direct2D.
 - **Script widgets** — run any command line on an interval, show its stdout,
   bind commands to left/middle/right click. YASB-style `<span>` color output
   is understood, so YASB custom-widget scripts work unchanged.
+- **Alt+Tab switcher** — replaces Windows' thumbnail switcher with a vertical
+  list of window *titles*. Windows reserves Alt+Tab, so this is a
+  `WH_KEYBOARD_LL` hook on its own thread; it changes no registry keys, so
+  quitting the bar hands Alt+Tab straight back to Windows. `[switcher]`
+  section, `enabled = false` to turn it off.
 - **System tray host** — the bar *is* the tray: it takes over the
   Shell_NotifyIcon protocol, hides explorer's taskbar, and renders every
   tray icon with click/right-click forwarding. `--restore-tray` hands
@@ -31,7 +36,12 @@ context — a single small exe rendering with software Direct2D.
 run. Sections: `[bar]` (height, position top/bottom, colors, font, reserve),
 `[left]`/`[center]`/`[right]` (widget lists), `[widget.<name>]` (per-widget
 options; `type =` selects the implementation so several widgets can share
-one, e.g. multiple `exec` script widgets).
+one, e.g. multiple `exec` script widgets), `[switcher]` (Alt+Tab list).
+
+Any widget can set `min_width` to give each of its segments a minimum
+clickable cell, with the content centered inside. Single-glyph segments like
+workspace numbers measure ~8 px otherwise, which is a poor mouse target;
+widening the cell fixes that without touching the font size.
 
 ## Build
 

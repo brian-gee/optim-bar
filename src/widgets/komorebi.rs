@@ -248,6 +248,10 @@ pub struct Workspaces {
     pipe_name: String,
     /// segment index -> workspace index (varies when empties are hidden)
     seg_map: Vec<usize>,
+    /// Pill behind the focused workspace, and the text color on top of it.
+    /// None disables the pill and falls back to a plain accent glyph.
+    active_fill: Option<u32>,
+    active_fg: u32,
 }
 
 impl Workspaces {
@@ -270,6 +274,22 @@ impl Workspaces {
             let (s, a, p) = (state.clone(), alive.clone(), pipe_name.clone());
             std::thread::spawn(move || subscribe(s, a, hmonitor, override_mon, p));
         }
+        // Accent-on-bg by default: two light Catppuccin foregrounds (accent
+        // B4BEFE vs text CDD6F4) are too close to tell apart at a glance, so
+        // the focused workspace gets a filled pill instead of another shade.
+        let active_fill = match cfg.ini.get_or(section, "active_fill", "accent").as_str() {
+            "none" => None,
+            "surface" => Some(cfg.surface),
+            "accent" => Some(cfg.accent),
+            hex => u32::from_str_radix(hex, 16).ok().or(Some(cfg.accent)),
+        };
+        let active_fg = match cfg.ini.get(section, "active_fg") {
+            Some("accent") => cfg.accent,
+            Some("fg") => cfg.fg,
+            Some(hex) => u32::from_str_radix(hex, 16).unwrap_or(cfg.bg.0),
+            // Dark glyph on a light pill; readable without touching font size.
+            None => cfg.bg.0,
+        };
         Workspaces {
             state,
             alive,
@@ -277,6 +297,8 @@ impl Workspaces {
             hide_empty,
             pipe_name,
             seg_map: Vec::new(),
+            active_fill,
+            active_fg,
         }
     }
 }
@@ -318,14 +340,14 @@ impl Widget for Workspaces {
             .iter()
             .filter(|w| !self.hide_empty || w.populated || w.focused)
             .map(|w| {
-                let role = if w.focused {
-                    Role::Accent
-                } else if w.populated {
-                    Role::Fg
-                } else {
-                    Role::Dim
-                };
-                Segment::text(&w.name, role)
+                match (w.focused, self.active_fill) {
+                    (true, Some(fill)) => {
+                        Segment::text(&w.name, Role::Custom(self.active_fg)).with_fill(fill)
+                    }
+                    (true, None) => Segment::text(&w.name, Role::Accent),
+                    _ if w.populated => Segment::text(&w.name, Role::Fg),
+                    _ => Segment::text(&w.name, Role::Dim),
+                }
             })
             .collect()
     }

@@ -6,6 +6,7 @@ mod config;
 mod flyout;
 mod json;
 mod statspop;
+mod switcher;
 mod toast;
 mod tray;
 mod weather;
@@ -145,6 +146,11 @@ fn main() -> Result<()> {
         CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()?;
 
         tray::ensure_host();
+
+        // Alt+Tab replacement. Owns a dedicated thread so its keyboard hook
+        // never waits on this loop's rendering — a low-level hook that misses
+        // LowLevelHooksTimeout gets silently unhooked by Windows.
+        switcher::install(&config::load());
 
         // Weather + airing advisor: background fetch, toast on good windows.
         // Runs only when the user has put coordinates in their config.

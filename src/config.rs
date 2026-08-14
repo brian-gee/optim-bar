@@ -183,17 +183,83 @@ accent = B4BEFE          # lavender
 surface = 313244         # surface0
 
 [left]
-widgets =
+widgets = workspaces, tasks
+
+[widget.workspaces]
+hide_empty = true
+min_width = 16           # clickable cell per number, logical px; font unchanged
+# active_fill = accent   # pill behind the focused workspace: accent | surface | none | RRGGBB
+# active_fg =            # glyph on that pill; defaults to the bar bg (dark on light)
+
+[widget.tasks]
+type = tasks
 
 [center]
 widgets = clock
 
+# NOTE: right-side widgets render first-listed NEAREST THE RIGHT EDGE.
+# The line below reads visually left-to-right as: systray, mic, volume,
+# cpu_temp, gpu_temp.
 [right]
-widgets =
+widgets = gpu_temp, cpu_temp, volume, mic, systray
+
+[widget.systray]
+type = systray
+
+[widget.volume]
+type = volume
+scroll_step = 2
+
+# Mic mute indicator/toggle (Windows endpoint level; red = muted, click toggles)
+[widget.mic]
+type = mic
+hotkey = alt+shift+m
+
+# cpu / mem have no bar slot by default — click any temp widget for the
+# stats dropdown, which shows both.
+[widget.cpu]
+type = cpu
+
+[widget.mem]
+type = mem
+
+[widget.gpu_temp]
+type = gpu_temp
+icon = 󰔃
+
+# CPU die temp via LibreHardwareMonitor's web server — optional; the widget
+# hides itself whenever LHM isn't running. sensor_id is hardware-specific;
+# the one below is an AMD Ryzen Tctl path. Browse http://localhost:8085 to
+# find yours.
+[widget.cpu_temp]
+type = lhm
+sensor_id = /amdcpu/0/temperature/2
+icon =
 
 [widget.clock]
 format = %a, %d %b %I:%M %p
 format_alt = %A, %d %B %Y
+
+# Generic exec widget: run a command on a timer, click to run others.
+# Add its name to a widgets = line above to show it.
+# [widget.eq]
+# type = exec
+# run = pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -File C:\\path\\to\\script.ps1 status
+# interval = 10000
+# on_left = pwsh -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File C:\\path\\to\\script.ps1 menu
+# on_middle = ...
+# on_right = ...
+
+# Alt+Tab replacement: a vertical list of window titles instead of thumbnails.
+# Alt+Tab steps down, Alt+Shift+Tab steps up, Esc cancels, release Alt to go.
+# Colors come from [bar]. Set enabled = false to hand Alt+Tab back to Windows.
+[switcher]
+enabled = true
+width = 620            # logical px
+max_rows = 14          # taller lists scroll to keep the selection visible
+# font =               # defaults to the bar font
+# font_size =          # defaults to bar font_size + 1
+# bypass =             # exe names that keep the stock Alt+Tab, e.g. acs.exe
 
 # Weather + airing advisor (Open-Meteo, no key). Click any stat widget
 # (cpu / mem / gpu_temp / cpu_temp) for the system+weather dropdown.

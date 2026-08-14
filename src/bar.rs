@@ -7,6 +7,7 @@ use windows::Win32::Graphics::Direct2D::{
     D2D1CreateFactory, ID2D1Factory, ID2D1HwndRenderTarget, ID2D1SolidColorBrush,
     D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_HWND_RENDER_TARGET_PROPERTIES,
     D2D1_PRESENT_OPTIONS_NONE, D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_SOFTWARE,
+    D2D1_ROUNDED_RECT,
 };
 use windows::Win32::Graphics::DirectWrite::{
     DWriteCreateFactory, IDWriteFactory, IDWriteTextFormat, DWRITE_FACTORY_TYPE_SHARED,
@@ -215,6 +216,10 @@ enum Side {
 struct Slot {
     widget: Box<dyn Widget>,
     side: Side,
+    /// Minimum clickable cell per segment, logical px. Single-glyph segments
+    /// (workspace numbers) measure ~8 px, which is a miserable mouse target;
+    /// the cell grows around the text without changing the font.
+    min_seg: f32,
 }
 
 /// Hit-test record from the last layout pass (physical px).
@@ -325,6 +330,11 @@ impl Bar {
         for (side_name, side) in groups {
             for name in self.cfg.side_widgets(side_name, self.index) {
                 if let Some(widget) = widgets::build(&name, &self.cfg, self.index, self.monitor) {
+                    let section = format!("widget.{name}");
+                    // Resolved the same way widgets::build does, so `type =`
+                    // aliases still pick up the right default.
+                    let kind = self.cfg.ini.get_or(&section, "type", &name);
+                    let default_min = if kind == "workspaces" { 26.0 } else { 0.0 };
                     self.slots.push(Slot {
                         widget,
                         side: match side {
@@ -332,6 +342,11 @@ impl Bar {
                             1 => Side::Center,
                             _ => Side::Right,
                         },
+                        min_seg: self
+                            .cfg
+                            .ini
+                            .get_f32(&section, "min_width", default_min)
+                            .clamp(0.0, 200.0),
                     });
                 }
             }
@@ -661,9 +676,13 @@ impl Bar {
                 slot: usize,
                 seg: usize,
                 text16: Vec<u16>,
+                /// Ink width of icon + text.
                 width: f32,
+                /// Laid-out/clickable width; >= width, content centered in it.
+                cell: f32,
                 role: Role,
                 icon: Option<(u64, std::sync::Arc<Vec<u8>>)>,
+                fill: Option<u32>,
             }
             let mut pieces: Vec<Piece> = Vec::new();
             let mut slot_widths: Vec<f32> = vec![0.0; self.slots.len()];
@@ -683,17 +702,20 @@ impl Bar {
                         0.0
                     };
                     let width = tw + iw;
+                    let cell = width.max(self.px(slot.min_seg));
                     if gi > 0 {
                         total += seg_gap;
                     }
-                    total += width;
+                    total += cell;
                     pieces.push(Piece {
                         slot: si,
                         seg: gi,
                         text16,
                         width,
+                        cell,
                         role: seg.role,
                         icon: seg.icon,
+                        fill: seg.fill,
                     });
                 }
                 slot_widths[si] = total;
@@ -753,7 +775,28 @@ impl Bar {
                     continue;
                 }
                 let x = cursor[p.slot];
-                let mut draw_x = x;
+                // Selection pill, drawn under the content across the whole cell.
+                if let Some(rgb) = p.fill {
+                    let inset = self.px(4.0);
+                    let r = self.px(4.0);
+                    gfx.custom.SetColor(&col(rgb, 1.0));
+                    gfx.rt.FillRoundedRectangle(
+                        &D2D1_ROUNDED_RECT {
+                            rect: D2D_RECT_F {
+                                left: x,
+                                top: inset,
+                                right: x + p.cell,
+                                bottom: h - inset,
+                            },
+                            radiusX: r,
+                            radiusY: r,
+                        },
+                        &gfx.custom,
+                    );
+                }
+                // Content sits centered in the cell; for most widgets cell ==
+                // width and this is a no-op.
+                let mut draw_x = x + (p.cell - p.width) / 2.0;
                 if let Some((key, pixels)) = &p.icon {
                     if let Some(bmp) = Self::icon_bitmap(&mut gfx, *key, pixels) {
                         gfx.rt.DrawBitmap(
@@ -795,13 +838,15 @@ impl Bar {
                         DWRITE_MEASURING_MODE_NATURAL,
                     );
                 }
+                // Claim half the inter-segment gap on each side so there is no
+                // dead strip between adjacent targets.
                 self.hits.push(HitRect {
                     slot: p.slot,
                     seg: p.seg,
-                    left: x,
-                    right: x + p.width,
+                    left: x - seg_gap / 2.0,
+                    right: x + p.cell + seg_gap / 2.0,
                 });
-                cursor[p.slot] = x + p.width + seg_gap;
+                cursor[p.slot] = x + p.cell + seg_gap;
             }
 
             if gfx.rt.EndDraw(None, None).is_ok() {
