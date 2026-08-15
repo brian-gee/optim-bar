@@ -104,12 +104,12 @@ pub struct Exec {
 
 impl Exec {
     pub fn new(cfg: &BarConfig, section: &str) -> Exec {
-        let run = cfg.ini.get_or(section, "run", "");
-        let interval = cfg.ini.get_u64(section, "interval", 5000).max(250);
+        let run = cfg.values.get_or(section, "run", "");
+        let interval = cfg.values.get_u64(section, "interval", 5000).max(250);
         let color = cfg
-            .ini
+            .values
             .get(section, "color")
-            .and_then(|v| u32::from_str_radix(v, 16).ok())
+            .and_then(|v| u32::from_str_radix(&v, 16).ok())
             .map(Role::Custom)
             .unwrap_or(Role::Fg);
 
@@ -134,9 +134,9 @@ impl Exec {
             alive,
             shown: String::new(),
             shown_color: None,
-            on_left: cfg.ini.get_or(section, "on_left", ""),
-            on_middle: cfg.ini.get_or(section, "on_middle", ""),
-            on_right: cfg.ini.get_or(section, "on_right", ""),
+            on_left: cfg.values.get_or(section, "on_left", ""),
+            on_middle: cfg.values.get_or(section, "on_middle", ""),
+            on_right: cfg.values.get_or(section, "on_right", ""),
             color,
         }
     }

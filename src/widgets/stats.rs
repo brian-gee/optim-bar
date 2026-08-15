@@ -32,7 +32,7 @@ pub struct Cpu {
 impl Cpu {
     pub fn new(cfg: &BarConfig, section: &str) -> Cpu {
         Cpu {
-            icon: cfg.ini.get_or(section, "icon", "\u{f4bc}"),
+            icon: cfg.values.get_or(section, "icon", "\u{f4bc}"),
             last_idle: 0,
             last_busy: 0,
             text: String::new(),
@@ -99,7 +99,7 @@ pub struct Mem {
 impl Mem {
     pub fn new(cfg: &BarConfig, section: &str) -> Mem {
         Mem {
-            icon: cfg.ini.get_or(section, "icon", "\u{efc5}"),
+            icon: cfg.values.get_or(section, "icon", "\u{efc5}"),
             text: String::new(),
             ticks: 0,
             style: statspop::Style::from_cfg(cfg),
@@ -193,7 +193,7 @@ pub struct GpuTemp {
 impl GpuTemp {
     pub fn new(cfg: &BarConfig, section: &str) -> GpuTemp {
         GpuTemp {
-            icon: cfg.ini.get_or(section, "icon", "\u{f0503}"),
+            icon: cfg.values.get_or(section, "icon", "\u{f0503}"),
             nvml: nvml_load(),
             text: String::new(),
             ticks: 0,

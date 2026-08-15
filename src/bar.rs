@@ -51,6 +51,24 @@ use windows::Win32::UI::Shell::{
     ABM_WINDOWPOSCHANGED, APPBARDATA,
 };
 
+/// Appbar-negotiation trace, for when a monitor won't give up its work area.
+/// Off unless `%LOCALAPPDATA%\optim-bar\appbar-probe.log` already exists
+/// (create it empty to switch on, delete it to switch off), so it costs one
+/// `exists()` per re-assert and nothing else. Worth keeping: SHAppBarMessage
+/// reports success whether explorer applied the reservation, ignored it, or
+/// never saw it, and only this trace tells those three apart.
+fn probe_log(line: &str) {
+    let Ok(dir) = std::env::var("LOCALAPPDATA") else { return };
+    let path = std::path::Path::new(&dir).join("optim-bar").join("appbar-probe.log");
+    if !path.exists() {
+        return;
+    }
+    if let Ok(mut f) = std::fs::OpenOptions::new().append(true).open(&path) {
+        use std::io::Write;
+        let _ = writeln!(f, "{line}");
+    }
+}
+
 use crate::config::{self, BarConfig};
 use crate::widgets::{self, Role, Segment, Widget};
 
@@ -294,12 +312,17 @@ impl Bar {
             });
             bar.build_slots();
 
+            // Born on its own monitor rather than at (0,0): GetDpiForWindow
+            // below then reports the DPI of the monitor the bar will live on,
+            // instead of the primary's until a WM_DPICHANGED corrects it.
+            let h = (bar.cfg.height) as i32;
+            let y = if bar.cfg.position_top { mon_rect.top } else { mon_rect.bottom - h };
             let hwnd = CreateWindowExW(
                 WS_EX_TOOLWINDOW | WS_EX_TOPMOST | WS_EX_NOACTIVATE,
                 WINDOW_CLASS,
                 w!("optim-bar"),
                 WS_POPUP,
-                0, 0, 100, 36,
+                mon_rect.left, y, mon_rect.right - mon_rect.left, h,
                 None,
                 None,
                 Some(hinstance.into()),
@@ -333,7 +356,7 @@ impl Bar {
                     let section = format!("widget.{name}");
                     // Resolved the same way widgets::build does, so `type =`
                     // aliases still pick up the right default.
-                    let kind = self.cfg.ini.get_or(&section, "type", &name);
+                    let kind = self.cfg.values.get_or(&section, "type", &name);
                     let default_min = if kind == "workspaces" { 26.0 } else { 0.0 };
                     self.slots.push(Slot {
                         widget,
@@ -344,7 +367,7 @@ impl Bar {
                         },
                         min_seg: self
                             .cfg
-                            .ini
+                            .values
                             .get_f32(&section, "min_width", default_min)
                             .clamp(0.0, 200.0),
                     });
@@ -403,17 +426,31 @@ impl Bar {
                     },
                     ..Default::default()
                 };
-                y = crate::tray::with_explorer_routed(|| {
-                    SHAppBarMessage(ABM_NEW, &mut abd); // no-op if already registered
-                    SHAppBarMessage(ABM_QUERYPOS, &mut abd);
+                let asked = abd.rc;
+                let host = crate::tray::host_hwnd();
+                let mut routed_to = 0;
+                let (new_r, query_r, setpos_r) = crate::tray::with_explorer_routed(|| {
+                    routed_to = crate::tray::found_tray();
+                    let a = SHAppBarMessage(ABM_NEW, &mut abd); // no-op if registered
+                    let b = SHAppBarMessage(ABM_QUERYPOS, &mut abd);
                     if self.cfg.position_top {
                         abd.rc.bottom = abd.rc.top + h;
                     } else {
                         abd.rc.top = abd.rc.bottom - h;
                     }
-                    SHAppBarMessage(ABM_SETPOS, &mut abd);
-                    abd.rc.top
+                    let c = SHAppBarMessage(ABM_SETPOS, &mut abd);
+                    (a, b, c)
                 });
+                y = abd.rc.top;
+                probe_log(&format!(
+                    "bar{} asked=({},{})-({},{}) got=({},{})-({},{}) NEW={} QUERYPOS={} SETPOS={} host={:#x} routed_to={:#x} {}",
+                    self.index,
+                    asked.left, asked.top, asked.right, asked.bottom,
+                    abd.rc.left, abd.rc.top, abd.rc.right, abd.rc.bottom,
+                    new_r, query_r, setpos_r,
+                    host, routed_to,
+                    if routed_to == host && host != 0 { "SELF!" } else { "explorer" }
+                ));
             }
 
             let _ = SetWindowPos(
@@ -438,7 +475,61 @@ impl Bar {
                 crate::tray::with_explorer_routed(|| {
                     SHAppBarMessage(ABM_WINDOWPOSCHANGED, &mut abd);
                 });
+                self.claim_work_area();
             }
+        }
+    }
+
+    /// Reserve the strip on a secondary monitor by writing the work area
+    /// directly.
+    ///
+    /// Explorer applies appbar reservations to the PRIMARY monitor only.
+    /// Measured, not assumed: a secondary bar's ABM_NEW/QUERYPOS/SETPOS all
+    /// return success with the rect unchanged, and the monitor's work area
+    /// never moves — while the identical sequence on the primary reserves
+    /// immediately. So the appbar registration stays (it is what works on
+    /// the primary, and it keeps explorer aware of the window) and every
+    /// other monitor gets SPI_SETWORKAREA.
+    ///
+    /// Only written when it is actually wrong. SPIF_SENDCHANGE broadcasts
+    /// WM_SETTINGCHANGE, explorer answers by recomputing work areas, and the
+    /// other bars answer that with ABN_POSCHANGED re-negotiation — an
+    /// unconditional write turns that chain into a permanent loop. Explorer
+    /// still erases this write whenever it recomputes, which is what the
+    /// WM_TIMER self-heal is for.
+    fn claim_work_area(&self) {
+        if self.is_primary() || self.work_area_ok() {
+            return;
+        }
+        unsafe {
+            let h = (self.cfg.height * self.scale) as i32;
+            let mut wa = self.mon_rect;
+            if self.cfg.position_top {
+                wa.top += h;
+            } else {
+                wa.bottom -= h;
+            }
+            let _ = SystemParametersInfoW(
+                SPI_SETWORKAREA,
+                0,
+                Some(&mut wa as *mut RECT as *mut std::ffi::c_void),
+                SPIF_SENDCHANGE,
+            );
+        }
+    }
+
+    /// True for the monitor explorer treats as primary — the only one whose
+    /// appbar reservation it honors.
+    fn is_primary(&self) -> bool {
+        use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, HMONITOR, MONITORINFO};
+        const MONITORINFOF_PRIMARY: u32 = 1;
+        unsafe {
+            let mut mi = MONITORINFO {
+                cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                ..Default::default()
+            };
+            GetMonitorInfoW(HMONITOR(self.monitor as *mut _), &mut mi).as_bool()
+                && mi.dwFlags & MONITORINFOF_PRIMARY != 0
         }
     }
 

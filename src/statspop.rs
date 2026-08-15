@@ -34,8 +34,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetCursorPos, GetWindowLongPtrW, KillTimer,
     LoadCursorW, RegisterClassW, SetForegroundWindow, SetTimer, SetWindowLongPtrW, ShowWindow,
     CREATESTRUCTW, GWLP_USERDATA, IDC_ARROW, SW_SHOW, WM_ERASEBKGND, WM_KEYDOWN, WM_KILLFOCUS,
-    WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_TIMER, WNDCLASSW, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
-    WS_POPUP,
+    WM_LBUTTONUP, WM_NCCREATE, WM_NCDESTROY, WM_PAINT, WM_TIMER, WNDCLASSW, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_POPUP,
 };
 
 use crate::weather::{self, compass, feeds_windows};
@@ -108,10 +108,9 @@ impl Style {
         // scan for the first `type = lhm` widget section.
         let sensor = ["cpu_temp", "lhm"]
             .iter()
-            .filter_map(|n| cfg.ini.get(&format!("widget.{n}"), "sensor_id"))
+            .filter_map(|n| cfg.values.get(&format!("widget.{n}"), "sensor_id"))
             .next()
-            .unwrap_or("")
-            .to_string();
+            .unwrap_or_default();
         Style {
             bg: cfg.bg,
             fg: cfg.fg,

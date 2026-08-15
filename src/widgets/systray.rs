@@ -18,12 +18,14 @@ pub struct Systray {
     bg: (u32, f32),
     dim: u32,
     surface: u32,
+    geom: flyout::Geom,
 }
 
 impl Systray {
     pub fn new(cfg: &BarConfig, section: &str) -> Systray {
         tray::ensure_host();
-        let collapsible = cfg.ini.get_or(section, "collapsed", "true") != "false";
+        let collapsible = cfg.values.get_or(section, "collapsed", "true") != "false";
+        let d = flyout::Geom::default();
         Systray {
             state: tray::state(),
             shown: Vec::new(),
@@ -32,12 +34,15 @@ impl Systray {
             bg: cfg.bg,
             dim: cfg.dim,
             surface: cfg.surface,
+            geom: flyout::Geom {
+                cols: (cfg.values.get_u64(section, "flyout_cols", d.cols as u64) as usize).clamp(1, 16),
+                cell: cfg.values.get_f32(section, "flyout_cell", d.cell).clamp(16.0, 96.0),
+                icon: cfg.values.get_f32(section, "flyout_icon", d.icon).clamp(8.0, 64.0),
+                pad: cfg.values.get_f32(section, "flyout_pad", d.pad).clamp(0.0, 32.0),
+            },
         }
     }
 
-    fn visible(&self) -> Vec<TrayIcon> {
-        self.shown.iter().filter(|i| !i.hidden).cloned().collect()
-    }
 }
 
 fn same(a: &[TrayIcon], b: &[TrayIcon]) -> bool {
@@ -97,7 +102,11 @@ impl Widget for Systray {
     fn on_click(&mut self, seg: usize, button: u8) {
         if self.collapsible {
             if seg == 0 && button == 0 {
-                flyout::toggle(self.visible(), self.bg, self.dim, self.surface);
+                // Everything, NIS_HIDDEN included. The flyout *is* the
+                // overflow chevron, so "hidden" means "not on the bar
+                // itself" — dropping those icons entirely left apps with
+                // no way to be reached at all.
+                flyout::toggle(self.shown.clone(), self.bg, self.dim, self.surface, self.geom);
             }
             return;
         }

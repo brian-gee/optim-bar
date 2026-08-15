@@ -23,6 +23,152 @@ struct Ws {
     populated: bool,
 }
 
+/// One window komorebi is managing, and where it lives.
+#[derive(Clone)]
+pub struct Managed {
+    pub hwnd: isize,
+    pub monitor: usize,
+    pub workspace: usize,
+    pub ws_name: String,
+    /// Its workspace is the one currently displayed on that monitor.
+    pub visible: bool,
+}
+
+/// Every managed window on every monitor, refreshed on each komorebi event.
+///
+/// komorebi hides off-workspace windows by *cloaking* them, and a cloaked
+/// window is indistinguishable from a UWP ghost (`Windows.UI.Core.CoreWindow`
+/// and friends, which are cloaked too and must stay out of window lists) by
+/// DWM alone. This registry is how the switcher tells the two apart.
+/// A `Vec` rather than a `HashMap` because `Mutex::new` is const and the list
+/// is a few dozen entries at most.
+static MANAGED: Mutex<Vec<Managed>> = Mutex::new(Vec::new());
+
+/// Where komorebi is keeping `hwnd`, if it manages it at all.
+pub fn managed(hwnd: isize) -> Option<Managed> {
+    MANAGED
+        .lock()
+        .ok()?
+        .iter()
+        .find(|m| m.hwnd == hwnd)
+        .cloned()
+}
+
+pub fn is_managed(hwnd: isize) -> bool {
+    MANAGED
+        .lock()
+        .map(|m| m.iter().any(|w| w.hwnd == hwnd))
+        .unwrap_or(false)
+}
+
+/// Focuses the workspace holding a window. komorebi uncloaks it asynchronously,
+/// so callers must wait for the window to actually surface.
+pub fn focus_workspace(monitor: usize, workspace: usize) {
+    spawn_hidden(&format!(
+        "komorebic focus-monitor-workspace {monitor} {workspace}"
+    ));
+}
+
+/// Fills the registry from a one-shot `komorebic state`, for code paths that
+/// run without a live subscription (the `--list-windows` diagnostic).
+pub fn seed_registry() {
+    let out = std::process::Command::new("komorebic")
+        .arg("state")
+        .creation_flags_hidden()
+        .output_string();
+    if let Some(v) = Value::parse(&out) {
+        if let Ok(mut m) = MANAGED.lock() {
+            *m = collect_managed(&v);
+        }
+    }
+}
+
+fn window_hwnd(v: &Value) -> Option<isize> {
+    v.get("hwnd").and_then(|h| h.as_f64()).map(|h| h as isize)
+}
+
+/// Pulls every managed hwnd out of a state JSON, tagged with its workspace.
+fn collect_managed(state: &Value) -> Vec<Managed> {
+    let mut out = Vec::new();
+    let Some(monitors) = state
+        .get("monitors")
+        .and_then(|m| m.get("elements"))
+        .and_then(|e| e.arr())
+    else {
+        return out;
+    };
+    for (mon_idx, mon) in monitors.iter().enumerate() {
+        let Some(workspaces) = mon.get("workspaces") else {
+            continue;
+        };
+        let focused = workspaces
+            .get("focused")
+            .and_then(|f| f.as_f64())
+            .unwrap_or(0.0) as usize;
+        let Some(list) = workspaces.get("elements").and_then(|e| e.arr()) else {
+            continue;
+        };
+        for (ws_idx, ws) in list.iter().enumerate() {
+            let ws_name = ws
+                .get("name")
+                .and_then(|n| n.as_str())
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| (ws_idx + 1).to_string());
+            let mut push = |hwnd: Option<isize>| {
+                if let Some(h) = hwnd.filter(|h| *h != 0) {
+                    out.push(Managed {
+                        hwnd: h,
+                        monitor: mon_idx,
+                        workspace: ws_idx,
+                        ws_name: ws_name.clone(),
+                        visible: ws_idx == focused,
+                    });
+                }
+            };
+            // Tiled containers.
+            if let Some(containers) = ws
+                .get("containers")
+                .and_then(|c| c.get("elements"))
+                .and_then(|e| e.arr())
+            {
+                for c in containers {
+                    if let Some(wins) = c
+                        .get("windows")
+                        .and_then(|w| w.get("elements"))
+                        .and_then(|e| e.arr())
+                    {
+                        for w in wins {
+                            push(window_hwnd(w));
+                        }
+                    }
+                }
+            }
+            // Monocle and native-maximized windows live outside the container ring.
+            if let Some(wins) = ws
+                .get("monocle_container")
+                .and_then(|m| m.get("windows"))
+                .and_then(|w| w.get("elements"))
+                .and_then(|e| e.arr())
+            {
+                for w in wins {
+                    push(window_hwnd(w));
+                }
+            }
+            if let Some(w) = ws.get("maximized_window").filter(|v| !v.is_null()) {
+                push(window_hwnd(w));
+            }
+            // Floating windows: a plain array in some versions, a ring in others.
+            if let Some(f) = ws.get("floating_windows") {
+                let floats = f.arr().or_else(|| f.get("elements").and_then(|e| e.arr()));
+                for w in floats.unwrap_or(&[]) {
+                    push(window_hwnd(w));
+                }
+            }
+        }
+    }
+    out
+}
+
 #[derive(Clone, PartialEq, Default)]
 struct State {
     online: bool,
@@ -99,6 +245,11 @@ fn extract(state: &Value, monitor: usize) -> Option<Vec<Ws>> {
 fn apply(state: &Arc<Mutex<State>>, v: &Value, hmonitor: isize, override_mon: Option<usize>) {
     let idx = resolve(v, hmonitor, override_mon);
     let ws = idx.and_then(|i| extract(v, i)).unwrap_or_default();
+    // Whole-desktop registry, not just this bar's monitor: the switcher lists
+    // every window on the machine. Bars on other monitors write the same data.
+    if let Ok(mut m) = MANAGED.lock() {
+        *m = collect_managed(v);
+    }
     if let Ok(mut s) = state.lock() {
         *s = State {
             online: true,
@@ -259,10 +410,10 @@ impl Workspaces {
         // The bar's HMONITOR is matched against komorebi's monitor ids at
         // state time; `monitor =` overrides for the rare mismatch.
         let override_mon = cfg
-            .ini
+            .values
             .get(section, "monitor")
             .and_then(|v| v.parse::<usize>().ok());
-        let hide_empty = cfg.ini.get_or(section, "hide_empty", "true") != "false";
+        let hide_empty = cfg.values.get_or(section, "hide_empty", "true") != "false";
         let pipe_name = format!(
             "optim-bar-komorebi-{}-{}",
             std::process::id(),
@@ -277,13 +428,13 @@ impl Workspaces {
         // Accent-on-bg by default: two light Catppuccin foregrounds (accent
         // B4BEFE vs text CDD6F4) are too close to tell apart at a glance, so
         // the focused workspace gets a filled pill instead of another shade.
-        let active_fill = match cfg.ini.get_or(section, "active_fill", "accent").as_str() {
+        let active_fill = match cfg.values.get_or(section, "active_fill", "accent").as_str() {
             "none" => None,
             "surface" => Some(cfg.surface),
             "accent" => Some(cfg.accent),
             hex => u32::from_str_radix(hex, 16).ok().or(Some(cfg.accent)),
         };
-        let active_fg = match cfg.ini.get(section, "active_fg") {
+        let active_fg = match cfg.values.get(section, "active_fg").as_deref() {
             Some("accent") => cfg.accent,
             Some("fg") => cfg.fg,
             Some(hex) => u32::from_str_radix(hex, 16).unwrap_or(cfg.bg.0),
@@ -362,5 +513,148 @@ impl Widget for Workspaces {
                 self.shown.mon_idx, ws_idx
             ));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Shaped after a real `komorebic state` (0.1.41): workspaces is a ring
+    /// (`elements` + `focused`), containers hold a `windows` ring, and
+    /// `floating_windows` is a ring in this version but a bare array in others.
+    const STATE: &str = r#"{
+      "monitors": {
+        "focused": 0,
+        "elements": [
+          {
+            "id": 65537,
+            "workspaces": {
+              "focused": 1,
+              "elements": [
+                {
+                  "name": "1",
+                  "containers": { "focused": 0, "elements": [
+                    { "id": "a", "windows": { "focused": 0, "elements": [
+                      { "hwnd": 111, "exe": "brave.exe", "title": "one" },
+                      { "hwnd": 222, "exe": "brave.exe", "title": "stacked" }
+                    ] } }
+                  ] },
+                  "monocle_container": null,
+                  "maximized_window": null,
+                  "floating_windows": { "focused": 0, "elements": [] }
+                },
+                {
+                  "name": "2",
+                  "containers": { "focused": 0, "elements": [] },
+                  "monocle_container": null,
+                  "maximized_window": null,
+                  "floating_windows": { "focused": 0, "elements": [
+                    { "hwnd": 333, "exe": "mpv.exe", "title": "floating" }
+                  ] }
+                }
+              ]
+            }
+          },
+          {
+            "id": 65539,
+            "workspaces": {
+              "focused": 0,
+              "elements": [
+                {
+                  "containers": { "focused": 0, "elements": [] },
+                  "monocle_container": { "id": "b", "windows": { "focused": 0, "elements": [
+                    { "hwnd": 444, "exe": "code.exe", "title": "monocle" }
+                  ] } },
+                  "maximized_window": null,
+                  "floating_windows": []
+                },
+                {
+                  "name": "gaming",
+                  "containers": { "focused": 0, "elements": [] },
+                  "monocle_container": null,
+                  "maximized_window": { "hwnd": 555, "exe": "game.exe", "title": "max" },
+                  "floating_windows": [
+                    { "hwnd": 666, "exe": "discord.exe", "title": "plain array form" }
+                  ]
+                }
+              ]
+            }
+          }
+        ]
+      }
+    }"#;
+
+    fn parsed() -> Vec<Managed> {
+        collect_managed(&Value::parse(STATE).expect("fixture parses"))
+    }
+
+    fn find(list: &[Managed], hwnd: isize) -> &Managed {
+        list.iter()
+            .find(|m| m.hwnd == hwnd)
+            .unwrap_or_else(|| panic!("hwnd {hwnd} missing from registry"))
+    }
+
+    #[test]
+    fn collects_every_window_shape() {
+        let all = parsed();
+        let mut hwnds: Vec<isize> = all.iter().map(|m| m.hwnd).collect();
+        hwnds.sort();
+        // tiled x2, floating ring, monocle, maximized, floating plain array
+        assert_eq!(hwnds, vec![111, 222, 333, 444, 555, 666]);
+    }
+
+    #[test]
+    fn tags_windows_with_monitor_and_workspace() {
+        let all = parsed();
+        let stacked = find(&all, 222);
+        assert_eq!((stacked.monitor, stacked.workspace), (0, 0));
+        let floating = find(&all, 333);
+        assert_eq!((floating.monitor, floating.workspace), (0, 1));
+        let maxed = find(&all, 555);
+        assert_eq!((maxed.monitor, maxed.workspace), (1, 1));
+    }
+
+    /// The whole point: only off-workspace windows need the switcher's
+    /// cloak exemption and a workspace switch before activation.
+    #[test]
+    fn visible_tracks_each_monitors_focused_workspace() {
+        let all = parsed();
+        assert!(!find(&all, 111).visible, "monitor 0 is showing workspace 1");
+        assert!(find(&all, 333).visible);
+        assert!(find(&all, 444).visible, "monitor 1 is showing workspace 0");
+        assert!(!find(&all, 555).visible);
+        assert!(!find(&all, 666).visible);
+    }
+
+    #[test]
+    fn workspace_name_falls_back_to_its_index() {
+        let all = parsed();
+        assert_eq!(find(&all, 333).ws_name, "2");
+        assert_eq!(find(&all, 666).ws_name, "gaming");
+        // Unnamed workspace: komorebi's own 1-based label.
+        assert_eq!(find(&all, 444).ws_name, "1");
+    }
+
+    #[test]
+    fn survives_junk_state() {
+        assert!(collect_managed(&Value::parse("{}").unwrap()).is_empty());
+        assert!(collect_managed(&Value::parse(r#"{"monitors":null}"#).unwrap()).is_empty());
+        assert!(collect_managed(
+            &Value::parse(r#"{"monitors":{"elements":[{"workspaces":{"elements":[{}]}}]}}"#)
+                .unwrap()
+        )
+        .is_empty());
+    }
+
+    #[test]
+    fn lookup_helpers_read_the_registry() {
+        if let Ok(mut m) = MANAGED.lock() {
+            *m = parsed();
+        }
+        assert!(is_managed(444));
+        assert!(!is_managed(999));
+        assert_eq!(managed(666).map(|m| m.ws_name), Some("gaming".to_string()));
+        assert!(managed(999).is_none());
     }
 }

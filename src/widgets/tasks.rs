@@ -25,6 +25,10 @@ use crate::widgets::{Segment, Widget};
 struct EnumCtx {
     /// None = every monitor (the switcher wants the whole desktop).
     monitor: Option<isize>,
+    /// Keep windows komorebi has cloaked onto another workspace. Ghost windows
+    /// (UWP frames, "Windows Input Experience") are cloaked the same way, so
+    /// only komorebi-managed ones are let back in.
+    offscreen: bool,
     out: Vec<isize>,
 }
 
@@ -51,7 +55,7 @@ unsafe extern "system" fn enum_cb(hwnd: HWND, lparam: LPARAM) -> windows::core::
         &mut cloaked as *mut _ as _,
         std::mem::size_of::<u32>() as u32,
     );
-    if cloaked != 0 {
+    if cloaked != 0 && !(ctx.offscreen && crate::widgets::komorebi::is_managed(hwnd.0 as isize)) {
         return true.into();
     }
     // Only windows on this bar's monitor.
@@ -66,15 +70,23 @@ unsafe extern "system" fn enum_cb(hwnd: HWND, lparam: LPARAM) -> windows::core::
 
 /// Candidate top-level windows in Z-order (topmost first). `monitor` limits
 /// the result to one monitor handle; None returns the whole desktop.
-pub fn enumerate(monitor: Option<isize>) -> Vec<isize> {
+/// `offscreen` additionally includes windows parked on komorebi's other
+/// workspaces — what the taskbar wants to leave out and the switcher wants in.
+pub fn enumerate_ex(monitor: Option<isize>, offscreen: bool) -> Vec<isize> {
     let mut ctx = EnumCtx {
         monitor,
+        offscreen,
         out: Vec::new(),
     };
     unsafe {
         let _ = EnumWindows(Some(enum_cb), LPARAM(&mut ctx as *mut _ as isize));
     }
     ctx.out
+}
+
+/// Windows visible on the current workspace only.
+pub fn enumerate(monitor: Option<isize>) -> Vec<isize> {
+    enumerate_ex(monitor, false)
 }
 
 /// Renders an HICON into 32x32 premultiplied BGRA.

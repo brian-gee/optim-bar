@@ -70,8 +70,8 @@ pub struct Clock {
 
 impl Clock {
     pub fn new(cfg: &BarConfig, section: &str) -> Clock {
-        let format = cfg.ini.get_or(section, "format", "%a, %d %b %I:%M %p");
-        let format_alt = cfg.ini.get_or(section, "format_alt", "%A, %d %B %Y");
+        let format = cfg.values.get_or(section, "format", "%a, %d %b %I:%M %p");
+        let format_alt = cfg.values.get_or(section, "format_alt", "%A, %d %B %Y");
         let text = format_time(&format);
         Clock {
             format,

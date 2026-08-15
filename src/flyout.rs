@@ -37,10 +37,31 @@ use crate::bar::ICON_SRC;
 use crate::tray::{self, TrayIcon};
 
 const CLASS: PCWSTR = w!("optim_bar_flyout");
-const COLS: usize = 4;
-const CELL: f32 = 40.0; // logical cell edge
-const ICON: f32 = 20.0; // logical icon edge inside a cell
-const PAD: f32 = 8.0;
+
+/// Grid geometry in logical px, from `[widget.systray]`.
+#[derive(Clone, Copy)]
+pub struct Geom {
+    /// Icons per row. Rows shorter than this appear only when there are fewer
+    /// icons than columns — the grid never pads out to full width.
+    pub cols: usize,
+    /// Cell edge: the click target, independent of the drawn icon size.
+    pub cell: f32,
+    /// Drawn icon edge, centred in its cell.
+    pub icon: f32,
+    /// Border padding around the whole grid.
+    pub pad: f32,
+}
+
+impl Default for Geom {
+    fn default() -> Self {
+        Geom {
+            cols: 5,
+            cell: 40.0,
+            icon: 18.0,
+            pad: 8.0,
+        }
+    }
+}
 
 static OPEN: AtomicIsize = AtomicIsize::new(0);
 
@@ -69,6 +90,8 @@ struct Flyout {
     bg: (u32, f32),
     dim: u32,
     surface: u32,
+    geom: Geom,
+    /// Columns actually used: `min(icon count, geom.cols)`.
     cols: usize,
     rows: usize,
     scale: f32,
@@ -85,8 +108,10 @@ fn col(v: u32, a: f32) -> D2D1_COLOR_F {
 }
 
 /// Opens the flyout under the cursor (or closes an already-open one).
-/// `icons` is the visible tray-icon snapshot; colors come from the bar cfg.
-pub fn toggle(icons: Vec<TrayIcon>, bg: (u32, f32), dim: u32, surface: u32) {
+/// `icons` is the full tray-icon snapshot, NIS_HIDDEN ones included — this
+/// popup is the overflow chevron, which is exactly where they belong.
+/// Colors come from the bar cfg.
+pub fn toggle(icons: Vec<TrayIcon>, bg: (u32, f32), dim: u32, surface: u32, geom: Geom) {
     if is_open() {
         close();
         return;
@@ -115,10 +140,10 @@ pub fn toggle(icons: Vec<TrayIcon>, bg: (u32, f32), dim: u32, surface: u32) {
         let _ = GetWindowRect(bar_hwnd, &mut bar_rc);
 
         let n = icons.len();
-        let cols = n.min(COLS);
+        let cols = n.min(geom.cols.max(1));
         let rows = n.div_ceil(cols);
-        let w = (2.0 * PAD + cols as f32 * CELL) * scale;
-        let h = (2.0 * PAD + rows as f32 * CELL) * scale;
+        let w = (2.0 * geom.pad + cols as f32 * geom.cell) * scale;
+        let h = (2.0 * geom.pad + rows as f32 * geom.cell) * scale;
         let margin = (4.0 * scale) as i32;
 
         // Below a top bar, above a bottom bar; clamped to the monitor.
@@ -144,6 +169,7 @@ pub fn toggle(icons: Vec<TrayIcon>, bg: (u32, f32), dim: u32, surface: u32) {
             bg,
             dim,
             surface,
+            geom,
             cols,
             rows,
             scale,
@@ -178,8 +204,8 @@ impl Flyout {
         unsafe {
             let factory: ID2D1Factory =
                 D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None).ok()?;
-            let w = (2.0 * PAD + self.cols as f32 * CELL) * self.scale;
-            let h = (2.0 * PAD + self.rows as f32 * CELL) * self.scale;
+            let w = (2.0 * self.geom.pad + self.cols as f32 * self.geom.cell) * self.scale;
+            let h = (2.0 * self.geom.pad + self.rows as f32 * self.geom.cell) * self.scale;
             let rt = factory
                 .CreateHwndRenderTarget(
                     &D2D1_RENDER_TARGET_PROPERTIES {
@@ -233,9 +259,9 @@ impl Flyout {
         }
         let Some(gfx) = &self.gfx else { return };
         unsafe {
-            let pad = PAD * self.scale;
-            let cell = CELL * self.scale;
-            let icon = ICON * self.scale;
+            let pad = self.geom.pad * self.scale;
+            let cell = self.geom.cell * self.scale;
+            let icon = self.geom.icon * self.scale;
             gfx.rt.BeginDraw();
             gfx.rt.Clear(Some(&col(self.bg.0, 1.0)));
             // Hairline border so the popup reads against dark windows.
@@ -300,8 +326,8 @@ impl Flyout {
 
     /// Cell index under a client-space point, if it maps to an icon.
     fn hit(&self, x: f32, y: f32) -> Option<usize> {
-        let pad = PAD * self.scale;
-        let cell = CELL * self.scale;
+        let pad = self.geom.pad * self.scale;
+        let cell = self.geom.cell * self.scale;
         if x < pad || y < pad {
             return None;
         }

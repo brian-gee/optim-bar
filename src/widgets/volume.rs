@@ -27,7 +27,7 @@ pub struct Volume {
 impl Volume {
     pub fn new(cfg: &BarConfig, section: &str) -> Volume {
         let icons = {
-            let list = cfg.ini.get_list(section, "icons");
+            let list = cfg.values.get_list(section, "icons");
             if list.len() >= 4 {
                 list
             } else {
@@ -42,7 +42,7 @@ impl Volume {
         Volume {
             ep: endpoint(),
             icons,
-            step: cfg.ini.get_f32(section, "scroll_step", 2.0) / 100.0,
+            step: cfg.values.get_f32(section, "scroll_step", 2.0) / 100.0,
             text: String::new(),
             muted: false,
             ticks: 0,

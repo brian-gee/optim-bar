@@ -41,14 +41,14 @@ impl Mic {
     pub fn new(cfg: &BarConfig, section: &str) -> Mic {
         Mic {
             ep: endpoint(),
-            icon_live: cfg.ini.get_or(section, "icon", "\u{f130}"), // nf-fa-microphone
-            icon_muted: cfg.ini.get_or(section, "icon_muted", "\u{f131}"),
+            icon_live: cfg.values.get_or(section, "icon", "\u{f130}"), // nf-fa-microphone
+            icon_muted: cfg.values.get_or(section, "icon_muted", "\u{f131}"),
             muted: None,
             ticks: 0,
             hotkey: cfg
-                .ini
+                .values
                 .get(section, "hotkey")
-                .and_then(crate::config::parse_hotkey),
+                .and_then(|k| crate::config::parse_hotkey(&k)),
         }
     }
 

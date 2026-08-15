@@ -64,11 +64,11 @@ pub struct Lhm {
 
 impl Lhm {
     pub fn new(cfg: &BarConfig, section: &str) -> Lhm {
-        let sensor_id = cfg.ini.get_or(section, "sensor_id", "");
-        let icon = cfg.ini.get_or(section, "icon", "\u{f4bc}");
-        let host = cfg.ini.get_or(section, "host", "localhost");
-        let port = cfg.ini.get_u64(section, "port", 8085) as u16;
-        let interval = cfg.ini.get_u64(section, "interval", 2000).max(1000);
+        let sensor_id = cfg.values.get_or(section, "sensor_id", "");
+        let icon = cfg.values.get_or(section, "icon", "\u{f4bc}");
+        let host = cfg.values.get_or(section, "host", "localhost");
+        let port = cfg.values.get_u64(section, "port", 8085) as u16;
+        let interval = cfg.values.get_u64(section, "interval", 2000).max(1000);
 
         let state = Arc::new(Mutex::new(String::new()));
         let alive = Arc::new(AtomicBool::new(true));

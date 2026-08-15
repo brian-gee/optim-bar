@@ -75,10 +75,10 @@ pub struct WeatherCfg {
 /// no default: coordinates are personal data and never ship in the binary.
 pub fn read_cfg(cfg: &BarConfig) -> Option<WeatherCfg> {
     let s = "weather";
-    let lat: f64 = cfg.ini.get(s, "lat")?.trim().parse().ok()?;
-    let lon: f64 = cfg.ini.get(s, "lon")?.trim().parse().ok()?;
+    let lat: f64 = cfg.values.get(s, "lat")?.trim().parse().ok()?;
+    let lon: f64 = cfg.values.get(s, "lon")?.trim().parse().ok()?;
     let bearings: Vec<f64> = cfg
-        .ini
+        .values
         .get_or(s, "window_bearings", "")
         .split(',')
         .filter_map(|p| p.trim().parse().ok())
@@ -88,10 +88,10 @@ pub fn read_cfg(cfg: &BarConfig) -> Option<WeatherCfg> {
         lon,
         // Without bearings every direction counts (alignment factor maxed).
         bearings,
-        toast: cfg.ini.get_or(s, "toast", "on") != "off",
-        toast_threshold: cfg.ini.get_u64(s, "toast_threshold", 65) as u32,
-        toast_from_hour: cfg.ini.get_u64(s, "toast_hours_from", 8) as u32,
-        toast_to_hour: cfg.ini.get_u64(s, "toast_hours_to", 22) as u32,
+        toast: cfg.values.get_or(s, "toast", "on") != "off",
+        toast_threshold: cfg.values.get_u64(s, "toast_threshold", 65) as u32,
+        toast_from_hour: cfg.values.get_u64(s, "toast_hours_from", 8) as u32,
+        toast_to_hour: cfg.values.get_u64(s, "toast_hours_to", 22) as u32,
     })
 }
 

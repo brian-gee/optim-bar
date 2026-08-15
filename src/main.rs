@@ -6,6 +6,7 @@ mod config;
 mod flyout;
 mod json;
 mod statspop;
+mod memguard;
 mod switcher;
 mod toast;
 mod tray;
@@ -120,6 +121,74 @@ fn main() -> Result<()> {
         bar::restore_work_areas();
         return Ok(());
     }
+    if std::env::args().any(|a| a == "--refresh-tray") {
+        // Repair hatch for missing tray icons: broadcasts TaskbarCreated so
+        // every app re-registers with whichever tray is on top — the running
+        // optim-bar. Cheaper than restarting the bar, and the fix for icons
+        // that went to explorer's tray during a shell restart.
+        tray::rebroadcast();
+        return Ok(());
+    }
+    if std::env::args().any(|a| a == "--list-tray") {
+        // Diagnostic for a missing icon: shows what the *running* host
+        // actually collected, so "registered somewhere else" stops looking
+        // identical to "this app never had a tray icon".
+        unsafe {
+            let _ = windows::Win32::System::Console::AttachConsole(
+                windows::Win32::System::Console::ATTACH_PARENT_PROCESS,
+            );
+        }
+        match tray::request_dump() {
+            Ok(text) => print!("{text}"),
+            Err(tray::DumpError::NoHost) => {
+                println!("no running optim-bar is hosting the tray")
+            }
+            Err(tray::DumpError::NoAnswer) => println!(
+                "the running optim-bar ignored the request — it predates --list-tray.\n\
+                 Restart it to pick up this build, then try again."
+            ),
+        }
+        return Ok(());
+    }
+    if std::env::args().any(|a| a == "--check-config") {
+        // GUI subsystem, so borrow the launching terminal's console for output.
+        unsafe {
+            let _ = windows::Win32::System::Console::AttachConsole(
+                windows::Win32::System::Console::ATTACH_PARENT_PROCESS,
+            );
+        }
+        config::check();
+        return Ok(());
+    }
+    if std::env::args().any(|a| a == "--mem-top") {
+        unsafe {
+            let _ = windows::Win32::System::Console::AttachConsole(
+                windows::Win32::System::Console::ATTACH_PARENT_PROCESS,
+            );
+        }
+        memguard::dump_top(10);
+        return Ok(());
+    }
+    if std::env::args().any(|a| a == "--list-windows") {
+        // Diagnostic: the exact list Alt+Tab would show, and where each window
+        // lives. Off-workspace rows only appear once komorebi's registry is
+        // seeded, which is precisely what tends to be wrong when one goes missing.
+        // GUI subsystem, so borrow the launching terminal's console for output.
+        unsafe {
+            let _ = windows::Win32::System::Console::AttachConsole(
+                windows::Win32::System::Console::ATTACH_PARENT_PROCESS,
+            );
+        }
+        widgets::komorebi::seed_registry();
+        for row in switcher::window_list() {
+            let place = match &row.offscreen {
+                Some((name, mon, ws)) => format!("ws {name} (monitor {mon}, index {ws})"),
+                None => "on screen".to_string(),
+            };
+            println!("{:>10}  {place:<32}  {}", row.hwnd, row.title);
+        }
+        return Ok(());
+    }
     if std::env::args().any(|a| a == "--version") {
         use windows::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_OK};
         let text: Vec<u16> = concat!("optim-bar ", env!("CARGO_PKG_VERSION"))
@@ -151,6 +220,11 @@ fn main() -> Result<()> {
         // never waits on this loop's rendering — a low-level hook that misses
         // LowLevelHooksTimeout gets silently unhooked by Windows.
         switcher::install(&config::load());
+
+        // Early warning on commit charge, which is what actually wedges the
+        // machine — and it climbs for hours before anything feels wrong.
+        toast::ensure_registered();
+        memguard::install(&config::load());
 
         // Weather + airing advisor: background fetch, toast on good windows.
         // Runs only when the user has put coordinates in their config.

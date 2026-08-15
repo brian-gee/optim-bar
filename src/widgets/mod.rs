@@ -83,7 +83,7 @@ pub fn build(
     monitor: isize,
 ) -> Option<Box<dyn Widget>> {
     let section = format!("widget.{name}");
-    match cfg.ini.get_or(&section, "type", name).as_str() {
+    match cfg.values.get_or(&section, "type", name).as_str() {
         "clock" => Some(Box::new(clock::Clock::new(cfg, &section))),
         "exec" => Some(Box::new(exec::Exec::new(cfg, &section))),
         "workspaces" => Some(Box::new(komorebi::Workspaces::new(
