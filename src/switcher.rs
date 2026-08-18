@@ -206,15 +206,23 @@ pub fn window_list() -> Vec<Row> {
         .filter(|r| !r.title.is_empty())
         .collect();
     let order = mru().clone();
-    // Sort is stable, so windows we have never seen focused — everything on a
-    // cold start — keep their old behaviour: on-screen first, Z-order within.
-    rows.sort_by_key(|r| {
-        (
-            order.iter().position(|&h| h == r.hwnd).unwrap_or(usize::MAX),
-            r.offscreen.is_some(),
-        )
-    });
+    rows.sort_by_key(|r| mru_key(&order, r.hwnd, r.offscreen.is_some()));
     rows
+}
+
+/// Sort key for one row: most-recently-focused first.
+///
+/// Windows we have never seen focused — which is all of them on a cold start —
+/// share the last rank and fall back to the old rule of on-screen before
+/// parked, with Z-order preserved between them because the sort is stable.
+/// Once a window has been focused its MRU rank wins outright, including over a
+/// visible one: the whole point is that the window you just left is next, even
+/// though komorebi has since cloaked it.
+fn mru_key(order: &[isize], hwnd: isize, offscreen: bool) -> (usize, bool) {
+    (
+        order.iter().position(|&h| h == hwnd).unwrap_or(usize::MAX),
+        offscreen,
+    )
 }
 
 struct Switcher {
@@ -1046,7 +1054,49 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
 
 #[cfg(test)]
 mod tests {
-    use super::{scrolled_to, slot_digit, stepped, vk_slot};
+    use super::{mru_key, scrolled_to, slot_digit, stepped, vk_slot};
+
+    /// Sorting a list of (hwnd, offscreen) by the real ordering rule.
+    fn order(mru: &[isize], windows: &[(isize, bool)]) -> Vec<isize> {
+        let mut v = windows.to_vec();
+        v.sort_by_key(|&(h, off)| mru_key(mru, h, off));
+        v.into_iter().map(|(h, _)| h).collect()
+    }
+
+    /// The bug this replaced: under komorebi only one window per monitor is
+    /// ever on screen, so ordering by visibility pinned the *other monitor* at
+    /// row 1 forever and single-Alt+Tab never went back where you came from.
+    /// Here hwnd 2 is that other-monitor window, and 3 is the one just left,
+    /// which komorebi has since cloaked.
+    #[test]
+    fn the_window_you_just_left_is_next_even_once_it_is_cloaked() {
+        let windows = [(1, false), (2, false), (3, true)];
+        assert_eq!(order(&[1, 3, 2], &windows), vec![1, 3, 2]);
+    }
+
+    #[test]
+    fn switching_back_and_forth_alternates() {
+        let windows = [(1, false), (2, false), (3, true)];
+        // Landed on 3: it leads, and 1 is the one to go back to.
+        assert_eq!(order(&[3, 1, 2], &windows), vec![3, 1, 2]);
+        // Back on 1, and 3 is next again — not the untouched window 2.
+        assert_eq!(order(&[1, 3, 2], &windows), vec![1, 3, 2]);
+    }
+
+    /// Cold start: nothing focused yet, so fall back to the old on-screen-first
+    /// rule rather than whatever order the enumeration happened to produce.
+    #[test]
+    fn unseen_windows_keep_on_screen_first() {
+        let windows = [(1, true), (2, false), (3, true), (4, false)];
+        assert_eq!(order(&[], &windows), vec![2, 4, 1, 3]);
+    }
+
+    /// A focused window outranks a never-focused one on either side of the cloak.
+    #[test]
+    fn known_windows_outrank_unknown_ones() {
+        let windows = [(1, false), (2, true)];
+        assert_eq!(order(&[2], &windows), vec![2, 1]);
+    }
 
     /// The label drawn on a row and the key that picks it must never drift
     /// apart — ASCII digits double as their own main-row virtual-key codes.

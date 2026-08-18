@@ -22,7 +22,8 @@ use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::Foundation::RECT;
 use windows::Win32::UI::WindowsAndMessaging::{
-    AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, GetCursorPos,
+    AppendMenuW, CreatePopupMenu, CreateWindowExW, DefWindowProcW, DestroyMenu, FindWindowW,
+    GetCursorPos, GetWindowThreadProcessId, PostMessageW,
     GetWindowLongPtrW, LoadCursorW, PostQuitMessage, RegisterClassW, SetForegroundWindow, SetTimer,
     SetWindowLongPtrW, SetWindowPos, ShowWindow, SystemParametersInfoW, TrackPopupMenu,
     CREATESTRUCTW, CS_HREDRAW, CS_VREDRAW, GWLP_USERDATA, HWND_TOPMOST, IDC_ARROW, MF_GRAYED,
@@ -96,6 +97,62 @@ fn taskbar_created_msg() -> u32 {
     *MSG.get_or_init(|| unsafe {
         windows::Win32::UI::WindowsAndMessaging::RegisterWindowMessageW(w!("TaskbarCreated"))
     })
+}
+
+/// Asks a running bar to shut down the way its menu's Exit does.
+///
+/// Exit lives in the bar's own context menu, which is exactly what is missing
+/// whenever the bar is the thing that needs replacing — after a rebuild, or
+/// from the launcher. Registered rather than a `WM_APP` value because the
+/// sender is a second process.
+fn quit_msg() -> u32 {
+    use std::sync::OnceLock;
+    static MSG: OnceLock<u32> = OnceLock::new();
+    *MSG.get_or_init(|| unsafe {
+        windows::Win32::UI::WindowsAndMessaging::RegisterWindowMessageW(w!("optim_bar_quit"))
+    })
+}
+
+/// Posts [`quit_msg`] to a running bar and waits for that process to go.
+///
+/// The wait is the point: the single-instance mutex outlives the window, so a
+/// replacement started the moment the window vanishes exits silently instead
+/// of taking over. Waits on the process handle rather than polling for the
+/// window, which is released a beat too early.
+///
+/// False when no bar is running — not an error for a restart, which still has
+/// its start half to do.
+pub fn request_quit() -> bool {
+    use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0};
+    use windows::Win32::System::Threading::{
+        OpenProcess, WaitForSingleObject, PROCESS_SYNCHRONIZE,
+    };
+    unsafe {
+        let Ok(hwnd) = FindWindowW(WINDOW_CLASS, None) else {
+            return false;
+        };
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        // Opened before the message is posted: afterwards the process may
+        // already be gone, leaving nothing to wait on.
+        let proc = OpenProcess(PROCESS_SYNCHRONIZE, false, pid).ok();
+        if PostMessageW(Some(hwnd), quit_msg(), WPARAM(0), LPARAM(0)).is_err() {
+            if let Some(h) = proc {
+                let _ = CloseHandle(h);
+            }
+            return false;
+        }
+        match proc {
+            Some(h) => {
+                // Generous: teardown un-reserves every monitor's work area and
+                // hands the tray back, each a broadcast explorer answers.
+                let done = WaitForSingleObject(h, 5000) == WAIT_OBJECT_0;
+                let _ = CloseHandle(h);
+                done
+            }
+            None => true,
+        }
+    }
 }
 
 /// Icon edge in logical px (matches Brian's YASB icon_size 18).
@@ -1161,6 +1218,13 @@ impl Bar {
 
 extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     unsafe {
+        if msg == quit_msg() {
+            // Bars live on the main thread, so this quits the loop that owns
+            // the cleanup — same path as the menu's Exit. Handled ahead of the
+            // per-bar dispatch below so it lands even on a half-built window.
+            PostQuitMessage(0);
+            return LRESULT(0);
+        }
         if msg == WM_NCCREATE {
             let cs = lparam.0 as *const CREATESTRUCTW;
             SetWindowLongPtrW(hwnd, GWLP_USERDATA, (*cs).lpCreateParams as isize);

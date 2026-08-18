@@ -1,9 +1,11 @@
 #![windows_subsystem = "windows"]
 
+mod air;
 mod bar;
 mod calendar;
 mod config;
 mod flyout;
+mod http;
 mod json;
 mod statspop;
 mod memguard;
@@ -121,6 +123,13 @@ fn main() -> Result<()> {
         bar::restore_work_areas();
         return Ok(());
     }
+    if std::env::args().any(|a| a == "--quit") {
+        // Shutdown for callers that have no bar to right-click: the launcher's
+        // restart entry, or a terminal after `cargo build`. Returns only once
+        // the old process is gone, so a start can follow immediately.
+        bar::request_quit();
+        return Ok(());
+    }
     if std::env::args().any(|a| a == "--refresh-tray") {
         // Repair hatch for missing tray icons: broadcasts TaskbarCreated so
         // every app re-registers with whichever tray is on top — the running
@@ -234,15 +243,20 @@ fn main() -> Result<()> {
                 toast::show(
                     "Good time to air out the apartment",
                     &format!(
-                        "{:.0} km/h from {} \u{b7} {:.0}\u{b0}F \u{b7} {:.0}% humidity \u{b7} score {}",
-                        h.wind_kmh,
+                        "{:.0} mph from {} \u{b7} {:.1}\u{b0}F \u{b7} {:.0}% humidity \u{b7} score {}",
+                        weather::to_mph(h.wind_kmh),
                         weather::compass(h.wind_dir),
-                        h.temp_c * 9.0 / 5.0 + 32.0,
+                        weather::to_f(h.temp_c),
                         h.humidity,
                         h.score
                     ),
                 );
             });
+        }
+
+        // Indoor air monitor on the LAN; also only when configured.
+        if let Some(acfg) = air::read_cfg(&config::load()) {
+            air::spawn(acfg);
         }
 
         let mut bars = bar::create_all();

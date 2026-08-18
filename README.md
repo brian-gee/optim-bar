@@ -12,6 +12,14 @@ context — a single small exe rendering with software Direct2D.
 - **GPU temp** — native NVML from your NVIDIA driver, no helper apps
 - **Any sensor from LibreHardwareMonitor** — optional; the widget hides itself
   when LHM isn't running (CPU die temp needs LHM's kernel driver)
+- **Air, in and out** — click any stat widget for the dropdown: system load,
+  then outdoor conditions (Open-Meteo, no key) scored for whether it's worth
+  opening the windows, with a labelled compass rose showing where the wind
+  is coming from against the bearings your windows face. An AirGradient
+  monitor on the LAN adds the indoor half, each reading annotated with what
+  it means relative to outside. Both are off until you fill in `[weather]`
+  and `[air]` — coordinates and hostnames are yours, and never ship as
+  defaults.
 - **Script widgets** — run any command line on an interval, show its stdout,
   bind commands to left/middle/right click. YASB-style `<span>` color output
   is understood, so YASB custom-widget scripts work unchanged.
@@ -54,7 +62,9 @@ context — a single small exe rendering with software Direct2D.
 run. Tables: `[bar]` (height, position top/bottom, colors, font, reserve),
 `[left]`/`[center]`/`[right]` (widget lists), `[widget.<name>]` (per-widget
 options; `type =` selects the implementation so several widgets can share
-one, e.g. multiple `exec` script widgets), `[switcher]` (Alt+Tab list).
+one, e.g. multiple `exec` script widgets), `[switcher]` (Alt+Tab list),
+`[weather]` (coordinates, window bearings, airing toasts), `[air]`
+(AirGradient monitor host).
 
 Colors are quoted hex (`surface = "313244"`) — unquoted, an all-digit color
 is a perfectly valid decimal integer and would render the wrong shade with
@@ -104,6 +114,21 @@ volume click opens sndvol), tray icon overflow/pinning (all icons show flat).
 optim-bar hides explorer's taskbar while hosting the tray. If the bar dies
 ungracefully, run `optim-bar.exe --restore-tray` (or just start the bar
 again) — it un-hides explorer's taskbar and broadcasts TaskbarCreated.
+
+## Restarting it
+
+The bar's Exit lives in its own context menu, which is no use once the bar is
+gone or wedged — and there is no taskbar left to open a terminal from either.
+
+```
+optim-bar.exe --quit   # graceful shutdown, same path as the menu's Exit
+```
+
+`--quit` messages the running bar and waits for that process to exit before
+returning, so a start can follow immediately: the single-instance mutex
+outlives the window, and a replacement launched a moment too early exits
+silently instead of taking over. optim drives both halves from its launcher
+(`optim-bar: Restart`), which is the way back that needs no terminal.
 
 ## If one tray icon is missing
 

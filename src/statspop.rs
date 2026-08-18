@@ -1,7 +1,9 @@
-//! System + weather dropdown: opened by clicking any of the stat widgets
+//! System + air dropdown: opened by clicking any of the stat widgets
 //! (cpu / mem / gpu_temp / cpu_temp). Live-refreshes once a second while
-//! open. Weather rows come from the shared weather state; the airing
-//! section shows the next stretches worth opening the windows for.
+//! open. Outdoor rows come from the shared weather state and indoor rows
+//! from the AirGradient monitor, deliberately stacked so the indoor numbers
+//! read as deltas against outside; the airing section shows the next
+//! stretches worth opening the windows for.
 
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
@@ -19,7 +21,8 @@ use windows::Win32::Graphics::DirectWrite::{
     DWriteCreateFactory, IDWriteFactory, IDWriteTextFormat, DWRITE_FACTORY_TYPE_SHARED,
     DWRITE_FONT_STRETCH_NORMAL, DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_WEIGHT_NORMAL,
     DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_MEASURING_MODE_NATURAL,
-    DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT_TRAILING,
+    DWRITE_PARAGRAPH_ALIGNMENT_CENTER, DWRITE_TEXT_ALIGNMENT, DWRITE_TEXT_ALIGNMENT_CENTER,
+    DWRITE_TEXT_ALIGNMENT_LEADING, DWRITE_TEXT_ALIGNMENT_TRAILING,
 };
 use windows::Win32::Graphics::Gdi::{
     BeginPaint, EndPaint, GetMonitorInfoW, InvalidateRect, MonitorFromPoint, MONITORINFO,
@@ -38,16 +41,22 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WS_EX_TOPMOST, WS_POPUP,
 };
 
-use crate::weather::{self, compass, feeds_windows};
+use crate::air;
+use crate::weather::{self, compass, feeds_windows, nearest_window};
 
 const CLASS: PCWSTR = w!("optim_bar_statspop");
-const WIDTH: f32 = 300.0;
+const WIDTH: f32 = 380.0;
 const ROW_H: f32 = 24.0;
 const BAR_H: f32 = 26.0;
-const WIND_H: f32 = 58.0;
+/// Three text lines beside the compass rose.
+const WIND_H: f32 = 76.0;
 const HEADER_H: f32 = 32.0;
 const BIG_H: f32 = 40.0;
 const PAD: f32 = 14.0;
+/// Compass rose radius, before the N/E/S/W labels ringing it.
+const ROSE_R: f32 = 22.0;
+/// Left edge of the value column in indoor comparison rows.
+const CMP_VALUE_X: f32 = 92.0;
 
 static OPEN: AtomicIsize = AtomicIsize::new(0);
 /// Tick of the last close, so the widget click that *caused* a focus-loss
@@ -125,9 +134,18 @@ impl Style {
 }
 
 enum Row {
-    Header(String),
+    /// Section title, plus a dim right-aligned note (freshness stamp).
+    Header(String, String),
     /// label, value, value color override (None = fg)
     KV(String, String, Option<u32>),
+    /// Three columns: dim label, colored value, dim right-aligned note.
+    /// The note is where an indoor reading says what it is *relative to*.
+    Cmp {
+        label: String,
+        value: String,
+        note: String,
+        color: Option<u32>,
+    },
     /// Labeled slim progress bar with a right-aligned value.
     Bar {
         label: String,
@@ -200,6 +218,12 @@ struct Gfx {
     fmt: IDWriteTextFormat,
     fmt_bold: IDWriteTextFormat,
     fmt_right: IDWriteTextFormat,
+    /// Right-aligned and a size down: freshness stamps and delta notes are
+    /// annotations, and shouldn't compete with the numbers they annotate.
+    fmt_right_small: IDWriteTextFormat,
+    /// Centered, for the compass letters sitting on their tick marks.
+    fmt_tiny: IDWriteTextFormat,
+    fmt_tiny_left: IDWriteTextFormat,
     fmt_big: IDWriteTextFormat,
     fg: ID2D1SolidColorBrush,
     dim: ID2D1SolidColorBrush,
@@ -258,6 +282,41 @@ fn day_hour(iso: &str) -> (&'static str, u32) {
     parse().unwrap_or(("?", 0))
 }
 
+/// "2026-08-16T15:30" -> "15:30", matching the 24-hour airing ranges below
+/// it. None when the string isn't a timestamp.
+fn hhmm(iso: &str) -> Option<String> {
+    let time = iso.split_once('T')?.1;
+    let h: u32 = time.get(0..2)?.parse().ok()?;
+    let m: u32 = time.get(3..5)?.parse().ok()?;
+    Some(format!("{h:02}:{m:02}"))
+}
+
+/// An age in seconds, in the shortest honest form.
+fn ago_secs(s: u64) -> String {
+    match s {
+        0..=89 => "just now".into(),
+        90..=3599 => format!("{}m ago", s / 60),
+        _ => format!("{}h ago", s / 3600),
+    }
+}
+
+/// How long ago a fetch landed.
+fn ago(t: std::time::Instant) -> String {
+    ago_secs(t.elapsed().as_secs())
+}
+
+/// Freshness stamp for a section header: when the reading is *for*, and how
+/// long ago we got it. Open-Meteo timestamps its observations on the
+/// quarter hour, so those two are different numbers and both matter.
+fn stamp(obs: Option<&str>, updated: Option<std::time::Instant>) -> String {
+    match (obs.and_then(hhmm), updated) {
+        (Some(t), Some(u)) => format!("{t}  \u{b7}  {}", ago(u)),
+        (Some(t), None) => t,
+        (None, Some(u)) => ago(u),
+        (None, None) => String::new(),
+    }
+}
+
 /// Current local time as an ISO-ish sortable "YYYY-MM-DDTHH:MM".
 fn now_key() -> String {
     let t = unsafe { GetLocalTime() };
@@ -267,10 +326,118 @@ fn now_key() -> String {
     )
 }
 
+/// Indoor rows from the AirGradient monitor. Each carries what it means
+/// *relative* to something: outdoor readings where there's a counterpart,
+/// and otherwise the threshold that decides whether the number is fine.
+/// Empty when no monitor is configured — the section then doesn't exist.
+fn indoor_rows(outdoor: Option<&weather::Current>) -> Vec<Row> {
+    let Ok(air) = air::state().lock() else {
+        return Vec::new();
+    };
+    if !air.configured {
+        return Vec::new();
+    }
+    // Cloud readings are as old as the device's last upload, which is not
+    // when we fetched them — prefer the reading's own clock when it has one.
+    let reading_age = air.reading.as_ref().and_then(|r| r.obs_epoch).map(|obs| {
+        ago_secs((air::now_epoch_utc() - obs).max(0) as u64)
+    });
+    let note = match (air.stale, reading_age, air.updated) {
+        (true, _, Some(u)) => format!("unreachable \u{b7} last {}", ago(u)),
+        (true, _, None) => "monitor unreachable".into(),
+        (false, Some(age), _) => age,
+        (false, None, Some(u)) => ago(u),
+        (false, None, None) => "connecting\u{2026}".into(),
+    };
+    let mut rows = vec![Row::Header("Inside".into(), note)];
+    let Some(r) = &air.reading else { return rows };
+
+    let scored = |label: &str, value: String, note: String, good: u32| Row::Cmp {
+        label: label.into(),
+        value,
+        note,
+        color: Some(score_color(good)),
+    };
+    if let Some(pm) = r.pm02 {
+        // The one indoor number with a true outdoor counterpart: same unit,
+        // same pollutant, so the difference is the whole story.
+        let note = match outdoor.and_then(|o| o.pm2_5) {
+            Some(out) => format!("{:+.0} vs outside", pm - out),
+            None => String::new(),
+        };
+        rows.push(scored(
+            "PM2.5",
+            format!("{pm:.0} \u{b5}g/m\u{b3}"),
+            note,
+            air::pm_goodness(pm),
+        ));
+    }
+    if let Some(co2) = r.co2 {
+        let note = match co2 {
+            c if c <= 600.0 => "fresh",
+            c if c <= 1000.0 => "fine",
+            c if c <= 1500.0 => "stuffy",
+            _ => "open a window",
+        };
+        rows.push(scored(
+            "CO2",
+            format!("{co2:.0} ppm"),
+            note.into(),
+            air::co2_goodness(co2),
+        ));
+    }
+    if let Some(voc) = r.tvoc {
+        let note = match voc {
+            v if v <= 120.0 => "at baseline",
+            v if v <= 250.0 => "elevated",
+            _ => "off-gassing",
+        };
+        rows.push(scored(
+            "VOC",
+            format!("{voc:.0} index"),
+            note.into(),
+            air::voc_goodness(voc),
+        ));
+    }
+    // NOx sits pinned at 1 in clean air; only worth a row once it moves.
+    if let Some(nox) = r.nox.filter(|n| *n > 1.0) {
+        rows.push(scored(
+            "NOx",
+            format!("{nox:.0} index"),
+            "combustion nearby".into(),
+            air::voc_goodness(nox),
+        ));
+    }
+    if let Some(t) = r.temp_c {
+        let f = weather::to_f(t);
+        rows.push(Row::Cmp {
+            label: "Temp".into(),
+            value: format!("{f:.2}\u{b0}F"),
+            note: match outdoor {
+                Some(o) => format!("{:+.1}\u{b0}F vs outside", f - weather::to_f(o.temp_c)),
+                None => String::new(),
+            },
+            color: None,
+        });
+    }
+    if let Some(h) = r.humidity {
+        rows.push(Row::Cmp {
+            label: "Humidity".into(),
+            value: format!("{h:.0}% RH"),
+            note: match outdoor {
+                Some(o) => format!("{:+.0}% vs outside", h - o.humidity),
+                None => String::new(),
+            },
+            color: None,
+        });
+    }
+    rows
+}
+
 impl Pop {
     fn build_rows(&mut self) {
         let mut rows = Vec::new();
-        rows.push(Row::Header("System".into()));
+        rows.push(Row::Header("System".into(), String::new()));
 
         // CPU % — needs two samples; first tick shows a placeholder.
         unsafe {
@@ -342,7 +509,8 @@ impl Pop {
         self.hint_row = None;
         let state = weather::state().lock();
         if let Ok(state) = state {
-            rows.push(Row::Header("Outside".into()));
+            let obs = state.current.as_ref().map(|c| c.obs_time.as_str());
+            rows.push(Row::Header("Outside".into(), stamp(obs, state.updated)));
             if !state.configured {
                 // No location set — coordinates never ship as defaults, so
                 // this is the first-run state. Click opens the config.
@@ -374,7 +542,12 @@ impl Pop {
                 None => rows.push(Row::KV("Waiting for forecast\u{2026}".into(), String::new(), None)),
             }
 
-            rows.push(Row::Header("Good times to air out".into()));
+            rows.extend(indoor_rows(state.current.as_ref()));
+
+            rows.push(Row::Header(
+                "Good times to air out".into(),
+                format!("score {}+", state.threshold),
+            ));
             let now = now_key();
             let mut ranges: Vec<(String, String, u32)> = Vec::new();
             let mut i = 0;
@@ -413,8 +586,8 @@ impl Pop {
 
     fn row_height(r: &Row) -> f32 {
         match r {
-            Row::Header(_) => HEADER_H,
-            Row::KV(..) => ROW_H,
+            Row::Header(..) => HEADER_H,
+            Row::KV(..) | Row::Cmp { .. } => ROW_H,
             Row::Bar { .. } => BAR_H,
             Row::Wind { .. } => WIND_H,
             Row::Big(..) => BIG_H,
@@ -452,12 +625,12 @@ impl Pop {
             if let Ok(card_brush) = gfx.rt.CreateSolidColorBrush(&surface, None) {
                 let mut i = 0;
                 while i < self.rows.len() {
-                    if matches!(self.rows[i], Row::Header(_)) {
+                    if matches!(self.rows[i], Row::Header(..)) {
                         i += 1;
                         continue;
                     }
                     let start = i;
-                    while i < self.rows.len() && !matches!(self.rows[i], Row::Header(_)) {
+                    while i < self.rows.len() && !matches!(self.rows[i], Row::Header(..)) {
                         i += 1;
                     }
                     let top = tops[start].0;
@@ -500,9 +673,12 @@ impl Pop {
                     bottom: top + h,
                 };
                 match row {
-                    Row::Header(title) => {
+                    Row::Header(title, note) => {
                         let rect = D2D_RECT_F { top: top + s(8.0), ..inner };
                         text(title, &gfx.fmt_bold, &rect, &gfx.dim);
+                        if !note.is_empty() {
+                            text(note, &gfx.fmt_right_small, &rect, &gfx.dim);
+                        }
                     }
                     Row::KV(label, value, color) => {
                         text(label, &gfx.fmt, &inner, &gfx.fg);
@@ -511,6 +687,25 @@ impl Pop {
                                 Some(b) => text(value, &gfx.fmt_right, &inner, &b),
                                 None => text(value, &gfx.fmt_right, &inner, &gfx.fg),
                             }
+                        }
+                    }
+                    Row::Cmp {
+                        label,
+                        value,
+                        note,
+                        color,
+                    } => {
+                        text(label, &gfx.fmt, &inner, &gfx.dim);
+                        let vrect = D2D_RECT_F {
+                            left: inner.left + s(CMP_VALUE_X),
+                            ..inner
+                        };
+                        match color.and_then(|c| tint(c, 1.0).ok()) {
+                            Some(b) => text(value, &gfx.fmt, &vrect, &b),
+                            None => text(value, &gfx.fmt, &vrect, &gfx.fg),
+                        }
+                        if !note.is_empty() {
+                            text(note, &gfx.fmt_right_small, &inner, &gfx.dim);
                         }
                     }
                     Row::Bar { label, value, frac } => {
@@ -556,9 +751,11 @@ impl Pop {
                         feeds,
                         bearings,
                     } => {
-                        // Compass rose, left.
-                        let r = s(20.0);
-                        let (cx, cy) = (inner.left + r + s(2.0), top + h / 2.0);
+                        // Compass rose, left. The extra gutter is room for
+                        // the N/E/S/W labels ringing it — without them the
+                        // rose is a pretty circle you can't read a bearing off.
+                        let r = s(ROSE_R);
+                        let (cx, cy) = (inner.left + r + s(14.0), top + h / 2.0);
                         let pt = |ang_deg: f64, radius: f32| {
                             let a = ang_deg.to_radians();
                             windows_numerics::Vector2 { X: cx + radius * a.sin() as f32, Y: cy - radius * a.cos() as f32 }
@@ -570,9 +767,22 @@ impl Pop {
                         };
                         if let Ok(b) = tint(self.style.dim, 0.55) {
                             gfx.rt.DrawEllipse(&ellipse, &b, s(1.2), None);
-                            // Cardinal ticks.
-                            for c in [0.0, 90.0, 180.0, 270.0] {
+                            // Cardinal ticks, each with its letter outside
+                            // the ring so the ray below reads as a bearing.
+                            for (c, name) in [(0.0, "N"), (90.0, "E"), (180.0, "S"), (270.0, "W")] {
                                 gfx.rt.DrawLine(pt(c, r - s(3.5)), pt(c, r), &b, s(1.2), None);
+                                let p = pt(c, r + s(8.0));
+                                text(
+                                    name,
+                                    &gfx.fmt_tiny,
+                                    &D2D_RECT_F {
+                                        left: p.X - s(8.0),
+                                        top: p.Y - s(8.0),
+                                        right: p.X + s(8.0),
+                                        bottom: p.Y + s(8.0),
+                                    },
+                                    &b,
+                                );
                             }
                         }
                         // Window bearings, accented.
@@ -601,36 +811,49 @@ impl Pop {
                         };
                         gfx.rt.FillEllipse(&dot, ray);
 
-                        // Text block to the right of the rose.
-                        let tx = inner.left + r * 2.0 + s(14.0);
-                        let mark = if *feeds { "  \u{2713} windows" } else { "" };
-                        let line1 = D2D_RECT_F {
+                        // Three text lines to the right of the rose.
+                        let tx = cx + r + s(20.0);
+                        let line = |a: f32, b: f32| D2D_RECT_F {
                             left: tx,
-                            top: top + s(6.0),
+                            top: top + s(a),
                             right: inner.right,
-                            bottom: top + h / 2.0,
-                        };
-                        let line2 = D2D_RECT_F {
-                            top: top + h / 2.0,
-                            bottom: top + h - s(6.0),
-                            ..line1
+                            bottom: top + s(b),
                         };
                         let wind_brush = if *feeds { &gfx.accent } else { &gfx.fg };
                         text(
-                            &format!("{kmh:.0} km/h from {}{mark}", compass(*dir)),
+                            &format!(
+                                "{:.0} mph from {} ({dir:.0}\u{b0})",
+                                weather::to_mph(*kmh),
+                                compass(*dir)
+                            ),
                             &gfx.fmt,
-                            &line1,
+                            &line(5.0, 27.0),
                             wind_brush,
                         );
                         text(
                             &format!(
-                                "{temp_c:.0}\u{b0}C / {:.0}\u{b0}F  \u{b7}  {humidity:.0}% RH",
-                                temp_c * 9.0 / 5.0 + 32.0
+                                "{:.2}\u{b0}F  \u{b7}  {humidity:.0}% RH",
+                                weather::to_f(*temp_c)
                             ),
                             &gfx.fmt,
-                            &line2,
+                            &line(27.0, 49.0),
                             &gfx.dim,
                         );
+                        // Says in words what the accent ticks mean, so the
+                        // rose doesn't have to be decoded to be useful.
+                        let facing = bearings
+                            .iter()
+                            .map(|b| compass(*b))
+                            .collect::<Vec<_>>()
+                            .join(" / ");
+                        let verdict = match nearest_window(bearings, *dir) {
+                            _ if bearings.is_empty() => {
+                                "set window_bearings to score direction".into()
+                            }
+                            Some(b) => format!("blows into your {} window", compass(b)),
+                            None => format!("misses your {facing} windows"),
+                        };
+                        text(&verdict, &gfx.fmt_tiny_left, &line(49.0, 71.0), &gfx.dim);
                     }
                     Row::Big(label, value, color) => {
                         // Tinted pill matching the score color.
@@ -698,7 +921,10 @@ impl Pop {
                 .collect();
             let font = PCWSTR(font16.as_ptr());
             let size = self.style.font_size * self.scale;
-            let mk = |sz: f32, weight, align_right: bool| -> windows::core::Result<IDWriteTextFormat> {
+            let mk = |sz: f32,
+                      weight,
+                      align: DWRITE_TEXT_ALIGNMENT|
+             -> windows::core::Result<IDWriteTextFormat> {
                 let f = dwrite.CreateTextFormat(
                     font,
                     None,
@@ -709,19 +935,21 @@ impl Pop {
                     w!("en-us"),
                 )?;
                 f.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
-                if align_right {
-                    f.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_TRAILING)?;
-                }
+                f.SetTextAlignment(align)?;
                 Ok(f)
             };
+            let small = (size * 0.85).max(9.0);
             Ok(Gfx {
                 fg: rt.CreateSolidColorBrush(&col(self.style.fg, 1.0), None)?,
                 dim: rt.CreateSolidColorBrush(&col(self.style.dim, 1.0), None)?,
                 accent: rt.CreateSolidColorBrush(&col(self.style.accent, 1.0), None)?,
-                fmt: mk(size, DWRITE_FONT_WEIGHT_NORMAL, false)?,
-                fmt_bold: mk(size, DWRITE_FONT_WEIGHT_SEMI_BOLD, false)?,
-                fmt_right: mk(size, DWRITE_FONT_WEIGHT_NORMAL, true)?,
-                fmt_big: mk(size * 1.5, DWRITE_FONT_WEIGHT_SEMI_BOLD, true)?,
+                fmt: mk(size, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_LEADING)?,
+                fmt_bold: mk(size, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_TEXT_ALIGNMENT_LEADING)?,
+                fmt_right: mk(size, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_TRAILING)?,
+                fmt_right_small: mk(small, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_TRAILING)?,
+                fmt_tiny: mk(small, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER)?,
+                fmt_tiny_left: mk(small, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_LEADING)?,
+                fmt_big: mk(size * 1.5, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_TEXT_ALIGNMENT_TRAILING)?,
                 rt,
             })
         }
@@ -940,5 +1168,35 @@ extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM)
             }
             _ => DefWindowProcW(hwnd, msg, wparam, lparam),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn observation_times_read_as_wall_clock() {
+        assert_eq!(hhmm("2026-08-16T15:30").as_deref(), Some("15:30"));
+        assert_eq!(hhmm("2026-08-16T00:05").as_deref(), Some("00:05"));
+        assert_eq!(hhmm("2026-08-16T09:45").as_deref(), Some("09:45"));
+        // The forecast API has gone quiet before; a junk stamp must not panic.
+        assert_eq!(hhmm(""), None);
+        assert_eq!(hhmm("2026-08-16"), None);
+    }
+
+    #[test]
+    fn age_reads_shortest_honest_unit() {
+        use std::time::{Duration, Instant};
+        let back = |s: u64| Instant::now() - Duration::from_secs(s);
+        assert_eq!(ago(back(0)), "just now");
+        assert_eq!(ago(back(300)), "5m ago");
+        assert_eq!(ago(back(7200)), "2h ago");
+    }
+
+    #[test]
+    fn stamp_survives_a_missing_half() {
+        assert_eq!(stamp(None, None), "");
+        assert_eq!(stamp(Some("2026-08-16T15:30"), None), "15:30");
     }
 }

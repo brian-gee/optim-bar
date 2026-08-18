@@ -8,14 +8,7 @@
 //! roughly those directions to actually flow through.
 
 use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
-
-use windows::core::{w, PCWSTR};
-use windows::Win32::Networking::WinHttp::{
-    WinHttpCloseHandle, WinHttpConnect, WinHttpOpen, WinHttpOpenRequest, WinHttpQueryDataAvailable,
-    WinHttpReadData, WinHttpReceiveResponse, WinHttpSendRequest, WINHTTP_ACCESS_TYPE_NO_PROXY,
-    WINHTTP_FLAG_SECURE, WINHTTP_OPEN_REQUEST_FLAGS,
-};
+use std::time::{Duration, Instant};
 
 use crate::config::BarConfig;
 use crate::json::Value;
@@ -39,6 +32,13 @@ pub struct Current {
     pub wind_kmh: f64,
     pub wind_dir: f64,
     pub score: u32,
+    /// The API's own timestamp for this observation, "YYYY-MM-DDTHH:MM"
+    /// local. Open-Meteo reports on the quarter hour, so this can trail the
+    /// fetch by a few minutes — the popup shows both.
+    pub obs_time: String,
+    /// Outdoor PM2.5 in ug/m3, for the indoor monitor to compare against.
+    /// None when the air-quality endpoint didn't answer.
+    pub pm2_5: Option<f64>,
 }
 
 #[derive(Default)]
@@ -46,6 +46,8 @@ pub struct WeatherState {
     pub current: Option<Current>,
     /// All forecast hours, chronological.
     pub hours: Vec<HourScore>,
+    /// When the last successful fetch landed, for the "5m ago" stamp.
+    pub updated: Option<Instant>,
     /// Config echo so the popup can annotate ("wind feeds NE window").
     pub bearings: Vec<f64>,
     /// Score at or above this counts as a good airing window.
@@ -146,72 +148,19 @@ pub fn score_hour(
     (weighted * rain_gate * 100.0).round() as u32
 }
 
-/// Blocking HTTPS GET via WinHTTP; returns the response body.
-fn https_get(host: &str, path: &str) -> Option<Vec<u8>> {
-    unsafe {
-        let host16: Vec<u16> = host.encode_utf16().chain(std::iter::once(0)).collect();
-        let path16: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
-        let session = WinHttpOpen(
-            w!("optim-bar/weather"),
-            WINHTTP_ACCESS_TYPE_NO_PROXY,
-            PCWSTR::null(),
-            PCWSTR::null(),
-            0,
-        );
-        if session.is_null() {
-            return None;
-        }
-        let mut out = None;
-        let conn = WinHttpConnect(session, PCWSTR(host16.as_ptr()), 443, 0);
-        if !conn.is_null() {
-            let req = WinHttpOpenRequest(
-                conn,
-                w!("GET"),
-                PCWSTR(path16.as_ptr()),
-                PCWSTR::null(),
-                PCWSTR::null(),
-                std::ptr::null_mut(),
-                WINHTTP_OPEN_REQUEST_FLAGS(WINHTTP_FLAG_SECURE.0),
-            );
-            if !req.is_null() {
-                if WinHttpSendRequest(req, None, None, 0, 0, 0).is_ok()
-                    && WinHttpReceiveResponse(req, std::ptr::null_mut()).is_ok()
-                {
-                    let mut body = Vec::new();
-                    loop {
-                        let mut avail = 0u32;
-                        if WinHttpQueryDataAvailable(req, &mut avail).is_err() || avail == 0 {
-                            break;
-                        }
-                        let start = body.len();
-                        body.resize(start + avail as usize, 0);
-                        let mut read = 0u32;
-                        if WinHttpReadData(
-                            req,
-                            body[start..].as_mut_ptr() as _,
-                            avail,
-                            &mut read,
-                        )
-                        .is_err()
-                        {
-                            break;
-                        }
-                        body.truncate(start + read as usize);
-                        if read == 0 {
-                            break;
-                        }
-                    }
-                    if !body.is_empty() {
-                        out = Some(body);
-                    }
-                }
-                let _ = WinHttpCloseHandle(req);
-            }
-            let _ = WinHttpCloseHandle(conn);
-        }
-        let _ = WinHttpCloseHandle(session);
-        out
-    }
+/// Outdoor PM2.5 from Open-Meteo's air-quality API, so the indoor monitor
+/// has something to be relative *to*. Best-effort: a failure here must not
+/// cost us the forecast.
+fn fetch_pm2_5(wc: &WeatherCfg) -> Option<f64> {
+    let path = format!(
+        "/v1/air-quality?latitude={}&longitude={}&current=pm2_5&timezone=auto",
+        wc.lat, wc.lon
+    );
+    let body = crate::http::get("air-quality-api.open-meteo.com", 443, &path, true)?;
+    Value::parse(&String::from_utf8_lossy(&body))?
+        .get("current")?
+        .get("pm2_5")
+        .and_then(Value::as_f64)
 }
 
 fn fetch_forecast(wc: &WeatherCfg) -> Option<(Current, Vec<HourScore>)> {
@@ -222,12 +171,14 @@ fn fetch_forecast(wc: &WeatherCfg) -> Option<(Current, Vec<HourScore>)> {
          &forecast_days=7&timezone=auto",
         wc.lat, wc.lon
     );
-    let body = https_get("api.open-meteo.com", &path)?;
+    let body = crate::http::get("api.open-meteo.com", 443, &path, true)?;
     let root = Value::parse(&String::from_utf8_lossy(&body))?;
 
     let cur = root.get("current")?;
     let f = |k: &str| cur.get(k).and_then(Value::as_f64).unwrap_or(0.0);
     let current = Current {
+        obs_time: cur.get("time").and_then(Value::as_str).unwrap_or("").to_string(),
+        pm2_5: fetch_pm2_5(wc),
         temp_c: f("temperature_2m"),
         humidity: f("relative_humidity_2m"),
         wind_kmh: f("wind_speed_10m"),
@@ -271,6 +222,17 @@ fn fetch_forecast(wc: &WeatherCfg) -> Option<(Current, Vec<HourScore>)> {
     Some((current, hours))
 }
 
+/// Celsius -> Fahrenheit. Both APIs report metric on the wire and nothing
+/// user-facing shows it: scoring stays in the source units, display never does.
+pub fn to_f(c: f64) -> f64 {
+    c * 9.0 / 5.0 + 32.0
+}
+
+/// km/h -> mph, same reason.
+pub fn to_mph(kmh: f64) -> f64 {
+    kmh * 0.621_371
+}
+
 /// Compass point ("NE") for a bearing.
 pub fn compass(dir: f64) -> &'static str {
     const PTS: [&str; 16] = [
@@ -283,6 +245,21 @@ pub fn compass(dir: f64) -> &'static str {
 /// True when this wind direction meaningfully feeds one of the windows.
 pub fn feeds_windows(bearings: &[f64], wind_dir: f64) -> bool {
     bearings.iter().any(|b| ang_dist(wind_dir, *b) <= 60.0)
+}
+
+/// The window bearing this wind is closest to, when it's close enough to
+/// blow in (<=60 deg). Drives the popup's plain-English "blows into the NE
+/// window" line.
+pub fn nearest_window(bearings: &[f64], wind_dir: f64) -> Option<f64> {
+    bearings
+        .iter()
+        .copied()
+        .filter(|b| ang_dist(wind_dir, *b) <= 60.0)
+        .min_by(|a, b| {
+            ang_dist(wind_dir, *a)
+                .partial_cmp(&ang_dist(wind_dir, *b))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
 }
 
 /// Background refresher; also drives the airing toast via `on_good_window`.
@@ -314,6 +291,7 @@ pub fn spawn(wc: WeatherCfg, on_good_window: impl Fn(&HourScore) + Send + 'stati
                 }
                 was_good = is_good;
                 if let Ok(mut s) = state().lock() {
+                    s.updated = Some(Instant::now());
                     s.current = Some(current);
                     s.hours = hours;
                     s.bearings = wc.bearings.clone();

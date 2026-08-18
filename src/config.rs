@@ -325,6 +325,26 @@ max_rows = 14             # taller lists scroll to keep the selection visible
 # toast_threshold = 65
 # toast_hours_from = 8
 # toast_hours_to = 22
+
+# Indoor air quality from an AirGradient monitor, shown next to the outdoor
+# numbers in the same dropdown. Two ways in — set exactly one:
+#
+#   host  — the monitor's own local API (ONE / Open Air, firmware 3.0.10+).
+#           Nothing leaves your LAN and the reading is live. Use the
+#           device's IP, or airgradient_<serial>.local.
+#   token — AirGradient's API, from the dashboard's Connectivity Settings.
+#           The only route for older DIY boards, which serve no local API.
+#           Readings are as fresh as the device's last cloud upload, and the
+#           dropdown stamps them with their own age, not the fetch time.
+#
+# A token is a credential: it lives in this local file and nowhere else.
+# [air]
+# host = "192.168.1.50"
+# token = ""
+# location = ""          # locationId or name, if the account has several
+# port = 80              # local API only
+# interval = 60          # seconds between polls
+# compensated = "on"     # use the firmware's corrected temp/humidity
 "##;
 
 /// Keys whose value is a colour written as bare hex. `313244` is all digits,
